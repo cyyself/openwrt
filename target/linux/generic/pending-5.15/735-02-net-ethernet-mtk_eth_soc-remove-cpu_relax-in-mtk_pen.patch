@@ -1,0 +1,42 @@
+From ec8cd134eeeecef9cccb5431b1a3f140ff2a413a Mon Sep 17 00:00:00 2001
+Message-Id: <ec8cd134eeeecef9cccb5431b1a3f140ff2a413a.1668980182.git.lorenzo@kernel.org>
+In-Reply-To: <b677d6c7a695dad1b02d2e0e428c39b3b344f270.1668980182.git.lorenzo@kernel.org>
+References: <b677d6c7a695dad1b02d2e0e428c39b3b344f270.1668980182.git.lorenzo@kernel.org>
+From: Lorenzo Bianconi <lorenzo@kernel.org>
+Date: Thu, 17 Nov 2022 00:58:46 +0100
+Subject: [PATCH net-next 2/2] net: ethernet: mtk_eth_soc: remove cpu_relax in
+ mtk_pending_work
+
+Get rid of cpu_relax in mtk_pending_work routine since MTK_RESETTING is
+set only in mtk_pending_work() and it runs holding rtnl lock
+
+Signed-off-by: Lorenzo Bianconi <lorenzo@kernel.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/mediatek/mtk_eth_soc.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -3664,11 +3664,8 @@ static void mtk_pending_work(struct work
+ 	rtnl_lock();
+ 
+ 	dev_dbg(eth->dev, "[%s][%d] reset\n", __func__, __LINE__);
++	set_bit(MTK_RESETTING, &eth->state);
+ 
+-	while (test_and_set_bit_lock(MTK_RESETTING, &eth->state))
+-		cpu_relax();
+-
+-	dev_dbg(eth->dev, "[%s][%d] mtk_stop starts\n", __func__, __LINE__);
+ 	/* stop all devices to make sure that dma is properly shut down */
+ 	for (i = 0; i < MTK_MAC_COUNT; i++) {
+ 		if (!eth->netdev[i])
+@@ -3702,7 +3699,7 @@ static void mtk_pending_work(struct work
+ 
+ 	dev_dbg(eth->dev, "[%s][%d] reset done\n", __func__, __LINE__);
+ 
+-	clear_bit_unlock(MTK_RESETTING, &eth->state);
++	clear_bit(MTK_RESETTING, &eth->state);
+ 
+ 	rtnl_unlock();
+ }

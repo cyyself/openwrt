@@ -1,0 +1,139 @@
+From 8a1978b559016d378ed5aaba18350f8ffe06eae6 Mon Sep 17 00:00:00 2001
+Message-Id: <8a1978b559016d378ed5aaba18350f8ffe06eae6.1670698930.git.lorenzo@kernel.org>
+In-Reply-To: <d5d0a2646d1caf759bc46e0222971074029ea4a3.1670698930.git.lorenzo@kernel.org>
+References: <d5d0a2646d1caf759bc46e0222971074029ea4a3.1670698930.git.lorenzo@kernel.org>
+From: Lorenzo Bianconi <lorenzo@kernel.org>
+Date: Tue, 29 Nov 2022 10:37:58 +0100
+Subject: [PATCH net-next 4/4] net: ethernet: mtk_wed: add reset/reset_complete
+ callbacks
+
+Introduce reset and reset_complete wlan callback to schedule WLAN driver
+reset when ethernet/wed driver is resetting.
+
+Co-developed-by: Sujuan Chen <sujuan.chen@mediatek.com>
+Signed-off-by: Sujuan Chen <sujuan.chen@mediatek.com>
+Signed-off-by: Lorenzo Bianconi <lorenzo@kernel.org>
+---
+ drivers/net/ethernet/mediatek/mtk_eth_soc.c |  6 ++++
+ drivers/net/ethernet/mediatek/mtk_wed.c     | 40 +++++++++++++++++++++
+ drivers/net/ethernet/mediatek/mtk_wed.h     |  8 +++++
+ include/linux/soc/mediatek/mtk_wed.h        |  2 ++
+ 4 files changed, 56 insertions(+)
+
+diff --git a/drivers/net/ethernet/mediatek/mtk_eth_soc.c b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+index bafae4f0312e..2d74e26f45c9 100644
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -3913,6 +3913,10 @@ static void mtk_pending_work(struct work_struct *work)
+ 		mtk_w32(eth, val, MTK_MAC_MCR(i));
+ 	}
+ 
++	rtnl_unlock();
++	mtk_wed_fe_reset();
++	rtnl_lock();
++
+ 	/* stop all devices to make sure that dma is properly shut down */
+ 	for (i = 0; i < MTK_MAC_COUNT; i++) {
+ 		if (!eth->netdev[i] || !netif_running(eth->netdev[i]))
+@@ -3949,6 +3953,8 @@ static void mtk_pending_work(struct work_struct *work)
+ 
+ 	clear_bit(MTK_RESETTING, &eth->state);
+ 
++	mtk_wed_fe_reset_complete();
++
+ 	rtnl_unlock();
+ }
+ 
+diff --git a/drivers/net/ethernet/mediatek/mtk_wed.c b/drivers/net/ethernet/mediatek/mtk_wed.c
+index a6271449617f..4854993f2941 100644
+--- a/drivers/net/ethernet/mediatek/mtk_wed.c
++++ b/drivers/net/ethernet/mediatek/mtk_wed.c
+@@ -206,6 +206,46 @@ mtk_wed_wo_reset(struct mtk_wed_device *dev)
+ 	iounmap(reg);
+ }
+ 
++void mtk_wed_fe_reset(void)
++{
++	int i;
++
++	mutex_lock(&hw_lock);
++
++	for (i = 0; i < ARRAY_SIZE(hw_list); i++) {
++		struct mtk_wed_hw *hw = hw_list[i];
++		struct mtk_wed_device *dev = hw->wed_dev;
++
++		if (!dev || !dev->wlan.reset)
++			continue;
++
++		/* reset callback blocks until WLAN reset is completed */
++		if (dev->wlan.reset(dev))
++			dev_err(dev->dev, "wlan reset failed\n");
++	}
++
++	mutex_unlock(&hw_lock);
++}
++
++void mtk_wed_fe_reset_complete(void)
++{
++	int i;
++
++	mutex_lock(&hw_lock);
++
++	for (i = 0; i < ARRAY_SIZE(hw_list); i++) {
++		struct mtk_wed_hw *hw = hw_list[i];
++		struct mtk_wed_device *dev = hw->wed_dev;
++
++		if (!dev || !dev->wlan.reset_complete)
++			continue;
++
++		dev->wlan.reset_complete(dev);
++	}
++
++	mutex_unlock(&hw_lock);
++}
++
+ static struct mtk_wed_hw *
+ mtk_wed_assign(struct mtk_wed_device *dev)
+ {
+diff --git a/drivers/net/ethernet/mediatek/mtk_wed.h b/drivers/net/ethernet/mediatek/mtk_wed.h
+index e012b8a82133..6108a7e69a80 100644
+--- a/drivers/net/ethernet/mediatek/mtk_wed.h
++++ b/drivers/net/ethernet/mediatek/mtk_wed.h
+@@ -128,6 +128,8 @@ void mtk_wed_add_hw(struct device_node *np, struct mtk_eth *eth,
+ void mtk_wed_exit(void);
+ int mtk_wed_flow_add(int index);
+ void mtk_wed_flow_remove(int index);
++void mtk_wed_fe_reset(void);
++void mtk_wed_fe_reset_complete(void);
+ #else
+ static inline void
+ mtk_wed_add_hw(struct device_node *np, struct mtk_eth *eth,
+@@ -146,6 +148,12 @@ static inline int mtk_wed_flow_add(int index)
+ static inline void mtk_wed_flow_remove(int index)
+ {
+ }
++static inline void mtk_wed_fe_reset(void)
++{
++}
++static inline void mtk_wed_fe_reset_complete(void)
++{
++}
+ 
+ #endif
+ 
+diff --git a/include/linux/soc/mediatek/mtk_wed.h b/include/linux/soc/mediatek/mtk_wed.h
+index db637a13888d..ddff54fc9717 100644
+--- a/include/linux/soc/mediatek/mtk_wed.h
++++ b/include/linux/soc/mediatek/mtk_wed.h
+@@ -150,6 +150,8 @@ struct mtk_wed_device {
+ 		void (*release_rx_buf)(struct mtk_wed_device *wed);
+ 		void (*update_wo_rx_stats)(struct mtk_wed_device *wed,
+ 					   struct mtk_wed_wo_rx_stats *stats);
++		int (*reset)(struct mtk_wed_device *wed);
++		int (*reset_complete)(struct mtk_wed_device *wed);
+ 	} wlan;
+ #endif
+ };
+-- 
+2.38.1
+
