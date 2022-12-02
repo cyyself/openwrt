@@ -19,6 +19,12 @@ mediatek_setup_interfaces()
 	xiaomi,redmi-router-ax6000)
 		ucidef_set_interfaces_lan_wan "lan2 lan3 lan4" wan
 		;;
+	tplink,tl-xdr6086)
+		ucidef_set_interfaces_lan_wan "lan1 lan2" eth1
+		;;
+	tplink,tl-xdr6088)
+		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4 lan5" eth1
+		;;
 	*)
 		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" wan
 		;;

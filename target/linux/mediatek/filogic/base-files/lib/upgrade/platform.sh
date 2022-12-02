@@ -21,6 +21,11 @@ platform_do_upgrade() {
 			;;
 		esac
 		;;
+	tplink,tl-xdr6086|\
+	tplink,tl-xdr6088)
+		CI_KERNPART="fit"
+		nand_do_upgrade "$1"
+		;;
 	*)
 		nand_do_upgrade "$1"
 		;;
@@ -36,7 +41,9 @@ platform_check_image() {
 	[ "$#" -gt 1 ] && return 1
 
 	case "$board" in
-	bananapi,bpi-r3)
+	bananapi,bpi-r3|\
+	tplink,tl-xdr6086|\
+	tplink,tl-xdr6088)
 		[ "$magic" != "d00dfeed" ] && {
 			echo "Invalid image type."
 			return 1
