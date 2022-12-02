@@ -236,6 +236,30 @@ define U-Boot/mt7986_bananapi_bpi-r3-nor
   FIP_COMPRESS:=1
 endef
 
+define U-Boot/mt7986_tplink_tl-xdr6086
+  NAME:=TP-LINK XDR-6086
+  BUILD_SUBTARGET:=filogic
+  BUILD_DEVICES:=tplink_tl-xdr6086
+  UBOOT_CONFIG:=mt7986_tplink_tl-xdr6086
+  UBOOT_IMAGE:=u-boot.fip
+  BL2_BOOTDEV:=spim-nand
+  BL2_SOC:=mt7986
+  BL2_DDRTYPE:=ddr3
+  DEPENDS:=+trusted-firmware-a-mt7986-spim-nand-ddr3
+endef
+
+define U-Boot/mt7986_tplink_tl-xdr6088
+  NAME:=TP-LINK XDR-6088
+  BUILD_SUBTARGET:=filogic
+  BUILD_DEVICES:=tplink_tl-xdr6088
+  UBOOT_CONFIG:=mt7986_tplink_tl-xdr6088
+  UBOOT_IMAGE:=u-boot.fip
+  BL2_BOOTDEV:=spim-nand
+  BL2_SOC:=mt7986
+  BL2_DDRTYPE:=ddr3
+  DEPENDS:=+trusted-firmware-a-mt7986-spim-nand-ddr3
+endef
+
 UBOOT_TARGETS := \
 	mt7620_mt7530_rfb \
 	mt7620_rfb \
@@ -256,6 +280,8 @@ UBOOT_TARGETS := \
 	mt7986_bananapi_bpi-r3-sdmmc \
 	mt7986_bananapi_bpi-r3-snand \
 	mt7986_bananapi_bpi-r3-nor \
+	mt7986_tplink_tl-xdr6086 \
+	mt7986_tplink_tl-xdr6088 \
 	mt7986_rfb
 
 ifdef CONFIG_TARGET_mediatek
