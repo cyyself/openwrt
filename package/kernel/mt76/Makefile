@@ -238,6 +238,30 @@ define KernelPackage/mt7986-firmware
   TITLE:=MediaTek MT7986 firmware
 endef
 
+define KernelPackage/mt7986-eeprom-mt7975-dual
+  $(KernelPackage/mt76-default)
+  DEPENDS:=@TARGET_mediatek_filogic
+  TITLE:=MediaTek MT7986+MT7975 dual default EEPROM
+endef
+
+define KernelPackage/mt7986-eeprom-mt7976
+  $(KernelPackage/mt76-default)
+  DEPENDS:=@TARGET_mediatek_filogic
+  TITLE:=MediaTek MT7986+MT7976 default EEPROM
+endef
+
+define KernelPackage/mt7986-eeprom-mt7976-dbdc
+  $(KernelPackage/mt76-default)
+  DEPENDS:=@TARGET_mediatek_filogic
+  TITLE:=MediaTek MT7986+MT7976 dbdc default EEPROM
+endef
+
+define KernelPackage/mt7986-eeprom-mt7976-dual
+  $(KernelPackage/mt76-default)
+  DEPENDS:=@TARGET_mediatek_filogic
+  TITLE:=MediaTek MT7986+MT7976 dual default EEPROM
+endef
+
 define KernelPackage/mt7921-firmware
   $(KernelPackage/mt76-default)
   TITLE:=MediaTek MT7921 firmware
@@ -480,6 +504,30 @@ define KernelPackage/mt7916-firmware/install
 		$(1)/lib/firmware/mediatek
 endef
 
+define KernelPackage/mt7986-eeprom-mt7975-dual/install
+	$(INSTALL_DIR) $(1)/lib/firmware/mediatek
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/firmware/mt7986_eeprom_mt7975_dual.bin \
+		$(1)/lib/firmware/mediatek
+endef
+
+define KernelPackage/mt7986-eeprom-mt7976/install
+	$(INSTALL_DIR) $(1)/lib/firmware/mediatek
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/firmware/mt7986_eeprom_mt7976.bin \
+		$(1)/lib/firmware/mediatek
+endef
+
+define KernelPackage/mt7986-eeprom-mt7976-dbdc/install
+	$(INSTALL_DIR) $(1)/lib/firmware/mediatek
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/firmware/mt7986_eeprom_mt7976_dbdc.bin \
+		$(1)/lib/firmware/mediatek
+endef
+
+define KernelPackage/mt7986-eeprom-mt7976-dual/install
+	$(INSTALL_DIR) $(1)/lib/firmware/mediatek
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/firmware/mt7986_eeprom_mt7976_dual.bin \
+		$(1)/lib/firmware/mediatek
+endef
+
 define KernelPackage/mt7986-firmware/install
 	$(INSTALL_DIR) $(1)/lib/firmware/mediatek
 	cp \
@@ -488,8 +536,8 @@ define KernelPackage/mt7986-firmware/install
 		$(PKG_BUILD_DIR)/firmware/mt7986_wm.bin \
 		$(PKG_BUILD_DIR)/firmware/mt7986_rom_patch_mt7975.bin \
 		$(PKG_BUILD_DIR)/firmware/mt7986_rom_patch.bin \
-		$(PKG_BUILD_DIR)/firmware/mt7986_eeprom_mt7975_dual.bin \
-		$(PKG_BUILD_DIR)/firmware/mt7986_eeprom_mt7976_dual.bin \
+		$(PKG_BUILD_DIR)/firmware/mt7986_wo_0.bin \
+		$(PKG_BUILD_DIR)/firmware/mt7986_wo_1.bin \
 		$(1)/lib/firmware/mediatek
 endef
 
@@ -530,6 +578,10 @@ $(eval $(call KernelPackage,mt7663s))
 $(eval $(call KernelPackage,mt7915e))
 $(eval $(call KernelPackage,mt7916-firmware))
 $(eval $(call KernelPackage,mt7986-firmware))
+$(eval $(call KernelPackage,mt7986-eeprom-mt7975-dual))
+$(eval $(call KernelPackage,mt7986-eeprom-mt7976))
+$(eval $(call KernelPackage,mt7986-eeprom-mt7976-dbdc))
+$(eval $(call KernelPackage,mt7986-eeprom-mt7976-dual))
 $(eval $(call KernelPackage,mt7921-firmware))
 $(eval $(call KernelPackage,mt7921-common))
 $(eval $(call KernelPackage,mt7921u))
