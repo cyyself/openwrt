@@ -34,6 +34,15 @@ bananapi,bpi-r3)
 		;;
 	esac
 	;;
+tplink,tl-xdr6086|\
+tplink,tl-xdr6088)
+	. /lib/upgrade/nand.sh
+	local envubi=$(nand_find_ubi ubi)
+	local envdev=/dev/$(nand_find_volume $envubi ubootenv)
+	local envdev2=/dev/$(nand_find_volume $envubi ubootenv2)
+	ubootenv_add_uci_config "$envdev" "0x0" "0x1f000" "0x1f000" "1"
+	ubootenv_add_uci_config "$envdev2" "0x0" "0x1f000" "0x1f000" "1"
+	;;
 xiaomi,redmi-router-ax6000)
 	ubootenv_add_uci_config "/dev/mtd1" "0x0" "0x10000" "0x20000"
 	ubootenv_add_uci_sys_config "/dev/mtd2" "0x0" "0x10000" "0x20000"
