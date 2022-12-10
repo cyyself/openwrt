@@ -1,0 +1,77 @@
+From 40d68fe49c4875c94b2cf934effd2b67b3ce51b2 Mon Sep 17 00:00:00 2001
+Message-Id: <40d68fe49c4875c94b2cf934effd2b67b3ce51b2.1670706908.git.lorenzo@kernel.org>
+From: Lorenzo Bianconi <lorenzo@kernel.org>
+Date: Wed, 7 Dec 2022 18:02:44 +0100
+Subject: [PATCH] wifi: mt76: mt7915: get rid of wed rx_buf_ring
+ page_frag_cache
+
+Signed-off-by: Lorenzo Bianconi <lorenzo@kernel.org>
+---
+ mt7915/mmio.c | 24 +++++++++++-------------
+ 1 file changed, 11 insertions(+), 13 deletions(-)
+
+--- a/mt7915/mmio.c
++++ b/mt7915/mmio.c
+@@ -594,10 +594,13 @@ static void mt7915_mmio_wed_offload_disa
+ static void mt7915_mmio_wed_release_rx_buf(struct mtk_wed_device *wed)
+ {
+ 	struct mt7915_dev *dev;
+-	struct page *page;
++	u32 length;
+ 	int i;
+ 
+ 	dev = container_of(wed, struct mt7915_dev, mt76.mmio.wed);
++	length = SKB_DATA_ALIGN(NET_SKB_PAD + wed->wlan.rx_size +
++				sizeof(struct skb_shared_info));
++
+ 	for (i = 0; i < dev->mt76.rx_token_size; i++) {
+ 		struct mt76_txwi_cache *t;
+ 
+@@ -612,13 +615,6 @@ static void mt7915_mmio_wed_release_rx_b
+ 
+ 		mt76_put_rxwi(&dev->mt76, t);
+ 	}
+-
+-	if (!wed->rx_buf_ring.rx_page.va)
+-		return;
+-
+-	page = virt_to_page(wed->rx_buf_ring.rx_page.va);
+-	__page_frag_cache_drain(page, wed->rx_buf_ring.rx_page.pagecnt_bias);
+-	memset(&wed->rx_buf_ring.rx_page, 0, sizeof(wed->rx_buf_ring.rx_page));
+ }
+ 
+ static u32 mt7915_mmio_wed_init_rx_buf(struct mtk_wed_device *wed, int size)
+@@ -635,19 +631,20 @@ static u32 mt7915_mmio_wed_init_rx_buf(s
+ 	for (i = 0; i < size; i++) {
+ 		struct mt76_txwi_cache *t = mt76_get_rxwi(&dev->mt76);
+ 		dma_addr_t phy_addr;
++		struct page *page;
+ 		int token;
+ 		void *ptr;
+ 
+-		ptr = page_frag_alloc(&wed->rx_buf_ring.rx_page, length,
+-				      GFP_KERNEL);
+-		if (!ptr)
++		page = __dev_alloc_pages(GFP_KERNEL, get_order(length));
++		if (!page)
+ 			goto unmap;
+ 
++		ptr = page_address(page);
+ 		phy_addr = dma_map_single(dev->mt76.dma_dev, ptr,
+ 					  wed->wlan.rx_size,
+ 					  DMA_TO_DEVICE);
+ 		if (unlikely(dma_mapping_error(dev->mt76.dev, phy_addr))) {
+-			skb_free_frag(ptr);
++			__free_pages(page, get_order(length));
+ 			goto unmap;
+ 		}
+ 
+@@ -656,7 +653,7 @@ static u32 mt7915_mmio_wed_init_rx_buf(s
+ 		if (token < 0) {
+ 			dma_unmap_single(dev->mt76.dma_dev, phy_addr,
+ 					 wed->wlan.rx_size, DMA_TO_DEVICE);
+-			skb_free_frag(ptr);
++			__free_pages(page, get_order(length));
+ 			goto unmap;
+ 		}
+ 

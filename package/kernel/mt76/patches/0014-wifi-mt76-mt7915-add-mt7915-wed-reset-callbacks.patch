@@ -1,0 +1,149 @@
+From 8d826817dc419cc58219373363b8800a3103b11c Mon Sep 17 00:00:00 2001
+Message-Id: <8d826817dc419cc58219373363b8800a3103b11c.1670707092.git.lorenzo@kernel.org>
+In-Reply-To: <073e148f3b2556ef02b331bbf636105733da8480.1670707091.git.lorenzo@kernel.org>
+References: <073e148f3b2556ef02b331bbf636105733da8480.1670707091.git.lorenzo@kernel.org>
+From: Lorenzo Bianconi <lorenzo@kernel.org>
+Date: Tue, 29 Nov 2022 13:50:20 +0100
+Subject: [PATCH net-next 4/5] wifi: mt76: mt7915: add mt7915 wed reset
+ callbacks
+
+Introduce mt7915_mmio_wed_reset_complete and
+mt7915_mmio_wed_reset_complete callbacks and the related wait
+queues in order to wait for wed reset completion during wlan reset.
+
+Co-developed-by: Sujuan Chen <sujuan.chen@mediatek.com>
+Signed-off-by: Sujuan Chen <sujuan.chen@mediatek.com>
+Signed-off-by: Lorenzo Bianconi <lorenzo@kernel.org>
+---
+ dma.c      |  2 +
+ mt76.h     |  3 ++
+ .../net/wireless/mediatek/mt76/mt7915/dma.c   | 20 ++++++++++
+ .../net/wireless/mediatek/mt76/mt7915/mmio.c  | 37 +++++++++++++++++++
+ 4 files changed, 62 insertions(+)
+
+--- a/dma.c
++++ b/dma.c
+@@ -898,6 +898,8 @@ mt76_dma_init(struct mt76_dev *dev,
+ 	snprintf(dev->napi_dev.name, sizeof(dev->napi_dev.name), "%s",
+ 		 wiphy_name(dev->hw->wiphy));
+ 	dev->napi_dev.threaded = 1;
++	init_completion(&dev->mmio.wed_reset);
++	init_completion(&dev->mmio.wed_reset_complete);
+ 
+ 	mt76_for_each_q_rx(dev, i) {
+ 		netif_napi_add(&dev->napi_dev, &dev->napi[i], poll);
+--- a/mt76.h
++++ b/mt76.h
+@@ -413,6 +413,7 @@ enum {
+ 	MT76_STATE_SUSPEND,
+ 	MT76_STATE_ROC,
+ 	MT76_STATE_PM,
++	MT76_STATE_WED_RESET,
+ };
+ 
+ struct mt76_hw_cap {
+@@ -591,6 +592,8 @@ struct mt76_mmio {
+ 	u32 irqmask;
+ 
+ 	struct mtk_wed_device wed;
++	struct completion wed_reset;
++	struct completion wed_reset_complete;
+ };
+ 
+ struct mt76_rx_status {
+--- a/mt7915/dma.c
++++ b/mt7915/dma.c
+@@ -559,6 +559,25 @@ int mt7915_dma_init(struct mt7915_dev *d
+ 	return 0;
+ }
+ 
++static void mt7915_dma_wed_reset(struct mt7915_dev *dev)
++{
++	struct mt76_dev *mdev = &dev->mt76;
++	struct mtk_wed_device *wed = &mdev->mmio.wed;
++	struct mt76_phy *mphy = &dev->mphy;
++
++	if (!mtk_wed_device_active(wed))
++		return;
++
++	if (!test_bit(MT76_STATE_WED_RESET, &mphy->state))
++		return;
++
++	complete(&mdev->mmio.wed_reset);
++
++	if (!wait_for_completion_timeout(&dev->mt76.mmio.wed_reset_complete,
++					 3 * HZ))
++		dev_err(dev->mt76.dev, "wed reset complete timeout\n");
++}
++
+ int mt7915_dma_reset(struct mt7915_dev *dev, bool force)
+ {
+ 	struct mt76_phy *mphy_ext = dev->mt76.phys[MT_BAND1];
+@@ -582,6 +601,7 @@ int mt7915_dma_reset(struct mt7915_dev *
+ 		mt7915_wfsys_reset(dev);
+ 
+ 	mt7915_dma_disable(dev, force);
++	mt7915_dma_wed_reset(dev);
+ 
+ 	/* reset hw queues */
+ 	for (i = 0; i < __MT_TXQ_MAX; i++) {
+--- a/mt7915/mmio.c
++++ b/mt7915/mmio.c
+@@ -8,6 +8,7 @@
+ 
+ #include "mt7915.h"
+ #include "mac.h"
++#include "mcu.h"
+ #include "../trace.h"
+ #include "../dma.h"
+ 
+@@ -695,6 +696,40 @@ static void mt7915_mmio_wed_update_rx_st
+ 
+ 	rcu_read_unlock();
+ }
++
++static int mt7915_mmio_wed_reset(struct mtk_wed_device *wed)
++{
++	struct mt76_dev *mdev = container_of(wed, struct mt76_dev, mmio.wed);
++	struct mt7915_dev *dev = container_of(mdev, struct mt7915_dev, mt76);
++	struct mt76_phy *mphy = &dev->mphy;
++	int ret;
++
++	if (test_and_set_bit(MT76_STATE_WED_RESET, &mphy->state))
++		return -EBUSY;
++
++	ret = mt7915_mcu_set_ser(dev, SER_RECOVER, SER_SET_RECOVER_L1,
++				 mphy->band_idx);
++	if (ret)
++		goto out;
++
++	if (!wait_for_completion_timeout(&mdev->mmio.wed_reset, 3 * HZ)) {
++		dev_err(mdev->dev, "wed reset timeout\n");
++		ret = -ETIMEDOUT;
++	}
++out:
++	clear_bit(MT76_STATE_WED_RESET, &mphy->state);
++
++	return ret;
++}
++
++static int mt7915_mmio_wed_reset_complete(struct mtk_wed_device *wed)
++{
++	struct mt76_dev *dev = container_of(wed, struct mt76_dev, mmio.wed);
++
++	complete(&dev->mmio.wed_reset_complete);
++
++	return 0;
++}
+ #endif
+ 
+ int mt7915_mmio_wed_init(struct mt7915_dev *dev, void *pdev_ptr,
+@@ -777,6 +812,8 @@ int mt7915_mmio_wed_init(struct mt7915_d
+ 	wed->wlan.init_rx_buf = mt7915_mmio_wed_init_rx_buf;
+ 	wed->wlan.release_rx_buf = mt7915_mmio_wed_release_rx_buf;
+ 	wed->wlan.update_wo_rx_stats = mt7915_mmio_wed_update_rx_stats;
++	wed->wlan.reset = mt7915_mmio_wed_reset;
++	wed->wlan.reset_complete = mt7915_mmio_wed_reset_complete;
+ 
+ 	dev->mt76.rx_token_size = wed->wlan.rx_npkt;
+ 

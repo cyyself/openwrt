@@ -1,0 +1,36 @@
+From d24f5a0705ee1cfecee6cb79569240ccf88ff5e0 Mon Sep 17 00:00:00 2001
+Message-Id: <d24f5a0705ee1cfecee6cb79569240ccf88ff5e0.1670707092.git.lorenzo@kernel.org>
+In-Reply-To: <073e148f3b2556ef02b331bbf636105733da8480.1670707091.git.lorenzo@kernel.org>
+References: <073e148f3b2556ef02b331bbf636105733da8480.1670707091.git.lorenzo@kernel.org>
+From: Sujuan Chen <sujuan.chen@mediatek.com>
+Date: Tue, 29 Nov 2022 12:14:27 +0100
+Subject: [PATCH net-next 3/5] wifi: mt76: dma: reset wed queues in
+ mt76_dma_rx_reset
+
+This is a preliminary patch to introduce proper wed reset support.
+
+Co-developed-by: Lorenzo Bianconi <lorenzo@kernel.org>
+Signed-off-by: Lorenzo Bianconi <lorenzo@kernel.org>
+Signed-off-by: Sujuan Chen <sujuan.chen@mediatek.com>
+---
+ dma.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+--- a/dma.c
++++ b/dma.c
+@@ -738,8 +738,13 @@ mt76_dma_rx_reset(struct mt76_dev *dev,
+ 		q->desc[i].ctrl = cpu_to_le32(MT_DMA_CTL_DMA_DONE);
+ 
+ 	mt76_dma_rx_cleanup(dev, q);
+-	mt76_dma_sync_idx(dev, q);
+-	mt76_dma_rx_fill(dev, q);
++
++	/* reset WED rx queues */
++	mt76_dma_wed_setup(dev, q, true);
++	if (q->flags != MT_WED_Q_TXFREE) {
++		mt76_dma_sync_idx(dev, q);
++		mt76_dma_rx_fill(dev, q);
++	}
+ 
+ 	if (!q->rx_head)
+ 		return;

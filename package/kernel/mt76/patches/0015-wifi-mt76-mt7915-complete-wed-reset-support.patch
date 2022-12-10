@@ -1,0 +1,100 @@
+From c7d899cc89352baff9de2590047bdb13346c7f62 Mon Sep 17 00:00:00 2001
+Message-Id: <c7d899cc89352baff9de2590047bdb13346c7f62.1670707092.git.lorenzo@kernel.org>
+In-Reply-To: <073e148f3b2556ef02b331bbf636105733da8480.1670707091.git.lorenzo@kernel.org>
+References: <073e148f3b2556ef02b331bbf636105733da8480.1670707091.git.lorenzo@kernel.org>
+From: Lorenzo Bianconi <lorenzo@kernel.org>
+Date: Tue, 29 Nov 2022 16:50:28 +0100
+Subject: [PATCH net-next 5/5] wifi: mt76: mt7915: complete wed reset support
+
+Stop Wireless Ethernet Dispatcher during mt7915 reset procedure.
+
+Co-developed-by: Sujuan Chen <sujuan.chen@mediatek.com>
+Signed-off-by: Sujuan Chen <sujuan.chen@mediatek.com>
+Signed-off-by: Lorenzo Bianconi <lorenzo@kernel.org>
+---
+ .../net/wireless/mediatek/mt76/mt7915/dma.c   | 30 +++++++++++++++----
+ .../net/wireless/mediatek/mt76/mt7915/mac.c   |  6 ++++
+ 2 files changed, 31 insertions(+), 5 deletions(-)
+
+--- a/mt7915/dma.c
++++ b/mt7915/dma.c
+@@ -578,9 +578,18 @@ static void mt7915_dma_wed_reset(struct
+ 		dev_err(dev->mt76.dev, "wed reset complete timeout\n");
+ }
+ 
++static void
++mt7915_dma_reset_tx_queue(struct mt7915_dev *dev, struct mt76_queue *q)
++{
++	mt76_queue_reset(dev, q);
++	if (mtk_wed_device_active(&dev->mt76.mmio.wed))
++		mt76_dma_wed_setup(&dev->mt76, q, true);
++}
++
+ int mt7915_dma_reset(struct mt7915_dev *dev, bool force)
+ {
+ 	struct mt76_phy *mphy_ext = dev->mt76.phys[MT_BAND1];
++	struct mtk_wed_device *wed = &dev->mt76.mmio.wed;
+ 	int i;
+ 
+ 	/* clean up hw queues */
+@@ -600,29 +609,40 @@ int mt7915_dma_reset(struct mt7915_dev *
+ 	if (force)
+ 		mt7915_wfsys_reset(dev);
+ 
++	if (mtk_wed_device_active(wed))
++		mtk_wed_device_dma_reset(wed);
++
+ 	mt7915_dma_disable(dev, force);
+ 	mt7915_dma_wed_reset(dev);
+ 
+ 	/* reset hw queues */
+ 	for (i = 0; i < __MT_TXQ_MAX; i++) {
+-		mt76_queue_reset(dev, dev->mphy.q_tx[i]);
++		mt7915_dma_reset_tx_queue(dev, dev->mphy.q_tx[i]);
+ 		if (mphy_ext)
+-			mt76_queue_reset(dev, mphy_ext->q_tx[i]);
++			mt7915_dma_reset_tx_queue(dev, mphy_ext->q_tx[i]);
+ 	}
+ 
+ 	for (i = 0; i < __MT_MCUQ_MAX; i++)
+ 		mt76_queue_reset(dev, dev->mt76.q_mcu[i]);
+ 
+-	mt76_for_each_q_rx(&dev->mt76, i)
++	mt76_for_each_q_rx(&dev->mt76, i) {
++		if (dev->mt76.q_rx[i].flags == MT_WED_Q_TXFREE)
++			continue;
++
+ 		mt76_queue_reset(dev, &dev->mt76.q_rx[i]);
++	}
+ 
+ 	mt76_tx_status_check(&dev->mt76, true);
+ 
+-	mt7915_dma_enable(dev);
+-
+ 	mt76_for_each_q_rx(&dev->mt76, i)
+ 		mt76_queue_rx_reset(dev, i);
+ 
++	if (mtk_wed_device_active(wed) && is_mt7915(&dev->mt76))
++		mt76_rmw(dev, MT_WFDMA0_EXT0_CFG, MT_WFDMA0_EXT0_RXWB_KEEP,
++			 MT_WFDMA0_EXT0_RXWB_KEEP);
++
++	mt7915_dma_enable(dev);
++
+ 	return 0;
+ }
+ 
+--- a/mt7915/mac.c
++++ b/mt7915/mac.c
+@@ -1582,6 +1582,12 @@ void mt7915_mac_reset_work(struct work_s
+ 	if (!(READ_ONCE(dev->recovery.state) & MT_MCU_CMD_STOP_DMA))
+ 		return;
+ 
++	if (mtk_wed_device_active(&dev->mt76.mmio.wed)) {
++		mtk_wed_device_stop(&dev->mt76.mmio.wed);
++		if (!is_mt7986(&dev->mt76))
++			mt76_wr(dev, MT_INT_WED_MASK_CSR, 0);
++	}
++
+ 	ieee80211_stop_queues(mt76_hw(dev));
+ 	if (ext_phy)
+ 		ieee80211_stop_queues(ext_phy->hw);
