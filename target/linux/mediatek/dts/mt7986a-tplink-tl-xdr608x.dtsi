@@ -101,12 +101,17 @@
 	gmac1: mac@1 {
 		compatible = "mediatek,eth-mac";
 		reg = <1>;
-		phy-handle = <&phy7>;
 		phy-mode = "2500base-x";
 
 		nvmem-cells = <&macaddr_config_1c>;
 		nvmem-cell-names = "mac-address";
 		mac-address-increment = <1>;
+
+		fixed-link {
+			speed = <2500>;
+			full-duplex;
+			pause;
+		};
 	};
 
 	mdio: mdio-bus {
@@ -131,6 +136,7 @@
 		reset-assert-us = <100000>;
 		reset-deassert-us = <100000>;
 		reset-gpios = <&pio 13 GPIO_ACTIVE_LOW>;
+		phy-mode = "2500base-x";
 	};
 
 	phy7: ethernet-phy@7 {
@@ -138,6 +144,7 @@
 		reset-assert-us = <100000>;
 		reset-deassert-us = <100000>;
 		reset-gpios = <&pio 17 GPIO_ACTIVE_LOW>;
+		phy-mode = "2500base-x";
 	};
 };
 

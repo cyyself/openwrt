@@ -21,8 +21,13 @@
 		port@5 {
 			reg = <5>;
 			label = "lan2";
-			phy-handle = <&phy5>;
 			phy-mode = "2500base-x";
+
+			fixed-link {
+				speed = <2500>;
+				full-duplex;
+				pause;
+			};
 		};
 
 		port@6 {

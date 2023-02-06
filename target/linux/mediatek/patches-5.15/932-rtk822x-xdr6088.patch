@@ -1,0 +1,5517 @@
+diff --git a/drivers/net/ethernet/mediatek/Kconfig b/drivers/net/ethernet/mediatek/Kconfig
+index 71e582e11..7f8032964 100644
+--- a/drivers/net/ethernet/mediatek/Kconfig
++++ b/drivers/net/ethernet/mediatek/Kconfig
+@@ -18,6 +18,7 @@ config NET_MEDIATEK_SOC
+ 	select DIMLIB
+ 	select PAGE_POOL
+ 	select PAGE_POOL_STATS
++	select NET_MEDIATEK_EXT_PHY_RTL822X
+ 	help
+ 	  This driver supports the gigabit ethernet MACs in the
+ 	  MediaTek SoC family.
+@@ -30,4 +31,11 @@ config NET_MEDIATEK_STAR_EMAC
+ 	  This driver supports the ethernet MAC IP first used on
+ 	  MediaTek MT85** SoCs.
+ 
++config NET_MEDIATEK_EXT_PHY_RTL822X
++	tristate "MediaTek SOC PHY RTL822X"
++	depends on NET_MEDIATEK_SOC
++	select PHYLIB
++	help
++	  This driver supports the gigabit ethernet rtl phy rtl822x
++
+ endif #NET_VENDOR_MEDIATEK
+diff --git a/drivers/net/ethernet/mediatek/Makefile b/drivers/net/ethernet/mediatek/Makefile
+index 801d0a02b..c4bef494c 100644
+--- a/drivers/net/ethernet/mediatek/Makefile
++++ b/drivers/net/ethernet/mediatek/Makefile
+@@ -11,6 +11,7 @@ mtk_eth-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed_debugfs.o
+ endif
+ obj-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed_ops.o
+ obj-$(CONFIG_NET_MEDIATEK_STAR_EMAC) += mtk_star_emac.o
++obj-$(CONFIG_NET_MEDIATEK_EXT_PHY_RTL822X) += rtl822x/
+ 
+ # FIXME: temporarily silence -Warray-bounds on non W=1+ builds
+ ifndef KBUILD_EXTRA_WARN
+diff --git a/drivers/net/ethernet/mediatek/mtk_eth_soc.c b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+index 85fefa1d6..e0ebf8e12 100644
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -27,6 +27,11 @@
+ 
+ #include "mtk_eth_soc.h"
+ #include "mtk_wed.h"
++#if defined (CONFIG_NET_MEDIATEK_EXT_PHY_RTL822X)
++#include "rtl822x/rtl_adapter.h"
++#include "rtl822x/rtl8226_typedef.h"
++#include "rtl822x/nic_rtl8226b_init.h"
++#endif
+ 
+ static int mtk_msg_level = -1;
+ module_param_named(msg_level, mtk_msg_level, int, 0);
+@@ -221,7 +226,7 @@ static int mtk_mdio_busy_wait(struct mtk_eth *eth)
+ 	return -ETIMEDOUT;
+ }
+ 
+-static int _mtk_mdio_write(struct mtk_eth *eth, u32 phy_addr, u32 phy_reg,
++int _mtk_mdio_write(struct mtk_eth *eth, u32 phy_addr, u32 phy_reg,
+ 			   u32 write_data)
+ {
+ 	int ret;
+@@ -267,7 +272,7 @@ static int _mtk_mdio_write(struct mtk_eth *eth, u32 phy_addr, u32 phy_reg,
+ 	return 0;
+ }
+ 
+-static int _mtk_mdio_read(struct mtk_eth *eth, u32 phy_addr, u32 phy_reg)
++int _mtk_mdio_read(struct mtk_eth *eth, u32 phy_addr, u32 phy_reg)
+ {
+ 	int ret;
+ 
+@@ -310,7 +315,7 @@ static int _mtk_mdio_read(struct mtk_eth *eth, u32 phy_addr, u32 phy_reg)
+ 	return mtk_r32(eth, MTK_PHY_IAC) & PHY_IAC_DATA_MASK;
+ }
+ 
+-static int mtk_mdio_write(struct mii_bus *bus, int phy_addr,
++int mtk_mdio_write(struct mii_bus *bus, int phy_addr,
+ 			  int phy_reg, u16 val)
+ {
+ 	struct mtk_eth *eth = bus->priv;
+@@ -318,13 +323,226 @@ static int mtk_mdio_write(struct mii_bus *bus, int phy_addr,
+ 	return _mtk_mdio_write(eth, phy_addr, phy_reg, val);
+ }
+ 
+-static int mtk_mdio_read(struct mii_bus *bus, int phy_addr, int phy_reg)
++int mtk_mdio_read(struct mii_bus *bus, int phy_addr, int phy_reg)
+ {
+ 	struct mtk_eth *eth = bus->priv;
+ 
+ 	return _mtk_mdio_read(eth, phy_addr, phy_reg);
+ }
+ 
++
++static int mtk_mii_rw(struct mtk_eth *eth, int phy, int reg, u16 data,
++             u32 cmd, u32 st)
++{
++#define PHY_IAC                MTK_PHY_IAC
++#define PHY_ACS_ST            BIT(31)
++#define MDIO_REG_ADDR_S            25
++#define MDIO_REG_ADDR_M            0x3e000000
++#define MDIO_PHY_ADDR_S            20
++#define MDIO_PHY_ADDR_M            0x1f00000
++#define MDIO_CMD_S            18
++#define MDIO_CMD_M            0xc0000
++#define MDIO_ST_S            16
++#define MDIO_ST_M            0x30000
++#define MDIO_RW_DATA_S            0
++#define MDIO_RW_DATA_M            0xffff
++#define MDIO_CMD_ADDR            0
++#define MDIO_CMD_WRITE            1
++#define MDIO_CMD_READ            2
++#define MDIO_CMD_READ_C45        3
++#define MDIO_ST_C45 0
++#define MDIO_ST_C22 1
++    u32 val = 0;
++    int ret = 0;
++
++    if (mtk_mdio_busy_wait(eth))
++        return -1;
++
++    val = (st << MDIO_ST_S) |
++          ((cmd << MDIO_CMD_S) & MDIO_CMD_M) |
++          ((phy << MDIO_PHY_ADDR_S) & MDIO_PHY_ADDR_M) |
++          ((reg << MDIO_REG_ADDR_S) & MDIO_REG_ADDR_M);
++
++    if (cmd == MDIO_CMD_WRITE || cmd == MDIO_CMD_ADDR)
++        val |= data & MDIO_RW_DATA_M;
++
++    mtk_w32(eth, val | PHY_ACS_ST, PHY_IAC);
++
++    if (mtk_mdio_busy_wait(eth))
++        return -1;
++
++    if (cmd == MDIO_CMD_READ || cmd == MDIO_CMD_READ_C45) {
++        val = mtk_r32(eth, PHY_IAC);
++        ret = val & MDIO_RW_DATA_M;
++    }
++
++    return ret;
++}
++
++int mtk_mmd_read(struct mtk_eth *eth, int addr, int devad, u16 reg)
++{
++    int val;
++
++    mutex_lock(&eth->mii_bus->mdio_lock);
++    mtk_mii_rw(eth, addr, devad, reg, MDIO_CMD_ADDR, MDIO_ST_C45);
++    val = mtk_mii_rw(eth, addr, devad, 0, MDIO_CMD_READ_C45,
++                MDIO_ST_C45);
++    mutex_unlock(&eth->mii_bus->mdio_lock);
++
++    return val;
++}
++
++void mtk_mmd_write(struct mtk_eth *eth, int addr, int devad, u16 reg,
++              u16 val)
++{
++    mutex_lock(&eth->mii_bus->mdio_lock);
++    mtk_mii_rw(eth, addr, devad, reg, MDIO_CMD_ADDR, MDIO_ST_C45);
++    mtk_mii_rw(eth, addr, devad, val, MDIO_CMD_WRITE, MDIO_ST_C45);
++    mutex_unlock(&eth->mii_bus->mdio_lock);
++}
++
++u32 mtk_cl45_ind_read(struct mtk_eth *eth, u16 port, u16 devad, u16 reg, u16 *data)
++{
++        mutex_lock(&eth->mii_bus->mdio_lock);
++        _mtk_mdio_write(eth, port, MII_MMD_ACC_CTL_REG, devad);
++        _mtk_mdio_write(eth, port, MII_MMD_ADDR_DATA_REG, reg);
++        _mtk_mdio_write(eth, port, MII_MMD_ACC_CTL_REG, MMD_OP_MODE_DATA | devad);
++        *data = _mtk_mdio_read(eth, port, MII_MMD_ADDR_DATA_REG);
++        mutex_unlock(&eth->mii_bus->mdio_lock);
++        return 0;
++}
++u32 mtk_cl45_ind_write(struct mtk_eth *eth, u16 port, u16 devad, u16 reg, u16 data)
++{
++        mutex_lock(&eth->mii_bus->mdio_lock);
++        _mtk_mdio_write(eth, port, MII_MMD_ACC_CTL_REG, devad);
++        _mtk_mdio_write(eth, port, MII_MMD_ADDR_DATA_REG, reg);
++        _mtk_mdio_write(eth, port, MII_MMD_ACC_CTL_REG, MMD_OP_MODE_DATA | devad);
++        _mtk_mdio_write(eth, port, MII_MMD_ADDR_DATA_REG, data);
++        mutex_unlock(&eth->mii_bus->mdio_lock);
++        return 0;
++}
++
++static int mtk_mdio_busy_wait(struct mtk_eth *eth);
++
++static int rtl822x_init(struct mtk_eth *eth, int addr)
++{
++#if defined(CONFIG_NET_MEDIATEK_EXT_PHY_RTL822X)
++	u32 val;
++	
++	val = mtk_mmd_read(eth, addr, 30, 0x75F3);
++	val &= ~(1 << 0);
++	mtk_mmd_write(eth, addr, 30, 0x75F3, val);
++
++	val = mtk_mmd_read(eth, addr, 30, 0x697A);
++	val &= ~(0x3F);
++	val |= 0x2;
++	val |= (1 << 15);
++	mtk_mmd_write(eth, addr, 30, 0x697A, val);
++
++	msleep(500);
++
++	val = mtk_mmd_read(eth, addr, 7, 0);
++	val |= (1 << 9);
++	mtk_mmd_write(eth, addr, 7, 0, val);
++
++    msleep(500);
++	
++	// set led
++
++	// led0 at 10/100/1000/2.5G
++	mtk_mmd_write(eth, addr, 31, 0xd032, 0x0027);
++	// led on time = 400ms, duty = 12.5%, freq = 60ms, Enable 10M LPI, modeA, act
++	mtk_mmd_write(eth, addr, 31, 0xd040, 0x321f);
++	// all led enable, polar = low
++	mtk_mmd_write(eth, addr, 31, 0xd044, 0xf8);
++
++	msleep(500);
++	
++	dev_info(eth->dev, "RTL822x init success!\n");
++
++	Rtl8226b_phy_init((HANDLE){eth, addr}, NULL, 1);
++
++	return 0;
++#else
++	dev_info(eth->dev, "RTL822x init failed!\n");
++	return 1;
++#endif
++}
++
++static struct mtk_extphy_id extphy_tbl[] = {
++	{0x001CC840, 0x0fffffff0, 1, rtl822x_init},
++};
++
++static u32 get_cl22_phy_id(struct mtk_eth *eth, int addr)
++{
++	int phy_reg;
++	u32 phy_id = 0;
++
++	phy_reg = _mtk_mdio_read(eth, addr, MII_PHYSID1);
++	if (phy_reg < 0)
++		return 0;
++	phy_id = (phy_reg & 0xffff) << 16;
++
++	/* Grab the bits from PHYIR2, and put them in the lower half */
++	phy_reg = _mtk_mdio_read(eth, addr, MII_PHYSID2);
++	if (phy_reg < 0)
++		return 0;
++
++	phy_id |= (phy_reg & 0xffff);
++
++	return phy_id;
++}
++
++static u32 get_cl45_phy_id(struct mtk_eth *eth, int addr)
++{
++	u16 phy_reg;
++	u32 phy_id = 0;
++
++	mtk_cl45_ind_read(eth, addr, 1, MII_PHYSID1, &phy_reg);
++	if (phy_reg < 0)
++		return 0;
++	phy_id = (phy_reg & 0xffff) << 16;
++
++	/* Grab the bits from PHYIR2, and put them in the lower half */
++	mtk_cl45_ind_read(eth, addr, 1, MII_PHYSID2, &phy_reg);
++	if (phy_reg < 0)
++		return 0;
++
++	phy_id |= (phy_reg & 0xffff);
++
++	return phy_id;
++}
++
++static inline bool phy_id_is_match(u32 id, struct mtk_extphy_id *phy)
++{
++	return ((id & phy->phy_id_mask) == (phy->phy_id & phy->phy_id_mask));
++}
++
++static int extphy_init(struct mtk_eth *eth, int addr)
++{
++	int i;
++	u32 phy_id;
++	struct mtk_extphy_id *extphy;
++
++	for (i = 0; i < ARRAY_SIZE(extphy_tbl); i++)
++	{
++		extphy = &extphy_tbl[i];
++		if (extphy->is_c45)
++		{
++			phy_id = get_cl45_phy_id(eth, addr);
++		}
++		else
++		{
++			phy_id = get_cl22_phy_id(eth, addr);
++		}
++
++		if (phy_id_is_match(phy_id, extphy))
++			extphy->init(eth, addr);
++	}
++
++	return 0;
++}
++
+ static int mt7621_gmac0_rgmii_adjust(struct mtk_eth *eth,
+ 				     phy_interface_t interface)
+ {
+@@ -4669,6 +4887,10 @@ static int mtk_probe(struct platform_device *pdev)
+ 	struct mtk_eth *eth;
+ 	int err, i;
+ 
++#if defined(CONFIG_NET_MEDIATEK_EXT_PHY_RTL822X)
++	static int ext_init = 0;
++#endif
++
+ 	eth = devm_kzalloc(&pdev->dev, sizeof(*eth), GFP_KERNEL);
+ 	if (!eth)
+ 		return -ENOMEM;
+@@ -4903,6 +5125,29 @@ static int mtk_probe(struct platform_device *pdev)
+ 	schedule_delayed_work(&eth->reset.monitor_work,
+ 			      MTK_DMA_MONITOR_TIMEOUT);
+ 
++#if 0
++	for_each_child_of_node(pdev->dev.of_node, port_np)
++	{
++		u32 addr = 0;
++		if (!of_device_is_compatible(port_np, "ext-phy"))
++			continue;
++		if (!of_device_is_available(port_np))
++			continue;
++		if (of_property_read_u32(port_np, "reg", &addr))
++			continue;
++		extphy_init(eth, addr);
++	}
++#endif
++#if defined (CONFIG_NET_MEDIATEK_EXT_PHY_RTL822X)
++    if (!ext_init)
++    {
++		// For TP-Link XDR6086 and XDR6088, we have two RTL822X at reg 5 and reg 7 respectively.
++        extphy_init(eth, 5);
++		extphy_init(eth, 7);
++        ext_init = 1;
++    }
++#endif
++
+ 	return 0;
+ 
+ err_deinit_mdio:
+diff --git a/drivers/net/ethernet/mediatek/mtk_eth_soc.h b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+index 7482b2b19..f6ee9a177 100644
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -578,6 +578,33 @@
+ 
+ #define MTK_MAC_FSM(x)		(0x1010C + ((x) * 0x100))
+ 
++/*MDIO control*/
++#define MII_MMD_ACC_CTL_REG             0x0d
++#define MII_MMD_ADDR_DATA_REG           0x0e
++#define MMD_OP_MODE_DATA BIT(14)
++
++struct mtk_eth;
++/* mmd */
++int mtk_mmd_read(struct mtk_eth *eth, int addr, int devad, u16 reg);
++void mtk_mmd_write(struct mtk_eth *eth, int addr, int devad, u16 reg,
++              u16 val);
++
++/* mdio */
++int mtk_mdio_read(struct mii_bus *bus, int phy_addr, int phy_reg);
++int mtk_mdio_write(struct mii_bus *bus, int phy_addr,
++			  int phy_reg, u16 val);
++int _mtk_mdio_read(struct mtk_eth *eth, u32 phy_addr, u32 phy_reg);
++int _mtk_mdio_write(struct mtk_eth *eth, u32 phy_addr, u32 phy_reg,
++			   u32 write_data);
++
++struct mtk_extphy_id
++{
++	u32 phy_id;
++	u32 phy_id_mask;
++	u32 is_c45;
++	int (*init)(struct mtk_eth *, int addr);
++};
++
+ struct mtk_rx_dma {
+ 	unsigned int rxd1;
+ 	unsigned int rxd2;
+diff --git a/drivers/net/ethernet/mediatek/rtl822x/Makefile b/drivers/net/ethernet/mediatek/rtl822x/Makefile
+new file mode 100755
+index 000000000..6f84daf0c
+--- /dev/null
++++ b/drivers/net/ethernet/mediatek/rtl822x/Makefile
+@@ -0,0 +1,4 @@
++ccflags-y=-Wall
++
++obj-$(CONFIG_NET_MEDIATEK_EXT_PHY_RTL822X)         += rtl822x_phy.o
++rtl822x_phy-objs := rtl_adapter.o nic_rtl8226b_init.o
+diff --git a/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b.c b/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b.c
+new file mode 100755
+index 000000000..a361c23f7
+--- /dev/null
++++ b/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b.c
+@@ -0,0 +1,2699 @@
++/*
++ * Copyright (C) 2019 Realtek Semiconductor Corp.
++ * All Rights Reserved.
++ *
++ * This program is the proprietary software of Realtek Semiconductor
++ * Corporation and/or its licensors, and only be used, duplicated,
++ * modified or distributed under the authorized license from Realtek.
++ *
++ * ANY USE OF THE SOFTWARE OTHER THAN AS AUTHORIZED UNDER
++ * THIS LICENSE OR COPYRIGHT LAW IS PROHIBITED.
++ *
++ * Purpose : PHY 8226 Driver
++ *
++ * Feature : PHY 8226 Driver
++ *
++ */
++
++
++//#include "typedef.h"
++//#include "rtl8156_mmd.h"
++//#include "phy_rtl8226.h"
++#include <common/rt_type.h>
++#include <common/rt_error.h>
++#include <common/debug/rt_log.h>
++#include <soc/type.h>
++#include <osal/time.h>
++//#include <osal/phy_osal.h>
++#include <hal/phy/nic_rtl8226/nic_rtl8226b.h>
++
++
++
++
++
++BOOLEAN
++Rtl8226b_phy_reset(
++    IN HANDLE hDevice
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata0 = 0, phydata1 = 0;
++    UINT16 waitcount = 0;
++
++    status = MmdPhyRead(hDevice, MMD_PMAPMD, 0x0, &phydata0);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata1 |= BIT_15;
++
++    status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0x0, phydata1);
++    if (status != SUCCESS)
++        goto exit;
++
++    while(TRUE)
++    {
++        status = MmdPhyRead(hDevice, MMD_PMAPMD, 0x0, &phydata1);
++        if (status != SUCCESS)
++            goto exit;
++
++        if (!(phydata1 & BIT_15))
++            break;
++
++        if (++waitcount == 500)
++        {
++            status = FAILURE;
++            goto exit;
++        }
++    }
++
++    status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0x0, phydata0);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_autoNegoEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_AN, 0, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_12) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_autoNegoEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    // AutoNegotiationEnable
++    status = MmdPhyRead(hDevice, MMD_AN, 0, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (Enable)
++        phydata |= BIT_12;
++    else
++        phydata &= (~BIT_12);
++
++    status = MmdPhyWrite(hDevice, MMD_AN, 0, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    // RestartAutoNegotiation
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA400, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata |= BIT_9;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA400, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_autoNegoAbility_get(
++    IN  HANDLE hDevice,
++    OUT PHY_LINK_ABILITY *pPhyAbility
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_AN, 16, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    // 10M
++    pPhyAbility->Half_10 = (phydata & BIT_5) ? (1) : (0);
++    pPhyAbility->Full_10 = (phydata & BIT_6) ? (1) : (0);
++
++    // 100M
++    pPhyAbility->Half_100 = (phydata & BIT_7) ? (1) : (0);
++    pPhyAbility->Full_100 = (phydata & BIT_8) ? (1) : (0);
++
++    pPhyAbility->FC = (phydata & BIT_10) ? (1) : (0);
++    pPhyAbility->AsyFC = (phydata & BIT_11) ? (1) : (0);
++
++    // 1G
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA412, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    pPhyAbility->Full_1000 = (phydata & BIT_9) ? (1) : (0);
++
++    // 2.5G
++    status = MmdPhyRead(hDevice, MMD_AN, 32, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    pPhyAbility->adv_2_5G = (phydata & BIT_7) ? (1) : (0);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_autoNegoAbility_set(
++    IN HANDLE hDevice,
++    IN PHY_LINK_ABILITY *pPhyAbility
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_AN, 16, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata &= (~(BIT_5 | BIT_6 | BIT_7 | BIT_8 | BIT_10 | BIT_11));
++
++    // 10M
++    phydata |= (pPhyAbility->Half_10 ? (BIT_5) : (0));
++    phydata |= (pPhyAbility->Full_10 ? (BIT_6) : (0));
++
++    // 100M
++    phydata |= (pPhyAbility->Half_100 ? (BIT_7) : (0));
++    phydata |= (pPhyAbility->Full_100 ? (BIT_8) : (0));
++
++    phydata |= (pPhyAbility->FC ? (BIT_10) : (0));
++    phydata |= (pPhyAbility->AsyFC ? (BIT_11) : (0));
++
++    status = MmdPhyWrite(hDevice, MMD_AN, 16, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    // 1G
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA412, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata &= (~BIT_9);
++
++    phydata |= (pPhyAbility->Full_1000 ? (BIT_9) : (0));
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA412, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    // 2.5G
++    status = MmdPhyRead(hDevice, MMD_AN, 32, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata &= (~BIT_7);
++
++    phydata |= (pPhyAbility->adv_2_5G ? (BIT_7) : (0));
++    status = MmdPhyWrite(hDevice, MMD_AN, 32, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (MmdPhyRead(hDevice, MMD_AN, 0, &phydata) == SUCCESS)
++    {
++        if (phydata & BIT_12)   /* AN_ENABLE */
++        {
++            phydata |= BIT_9; /* RESTART_AN */
++            MmdPhyWrite(hDevice, MMD_AN, 0, phydata);
++        }
++    }
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_duplex_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA434, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_3) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++
++BOOLEAN
++Rtl8226b_duplex_set(                // christy add 0430
++        IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA400, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (Enable)
++        phydata |= BIT_8;
++    else
++        phydata &= (~BIT_8);
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA400, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++
++
++BOOLEAN
++Rtl8226b_is_link(
++    IN  HANDLE hDevice,
++    OUT BOOL *plinkOK
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    UINT8 i = 0;
++
++    // must read twice
++    for(i=0;i<2;i++)
++    {
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA402, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++    }
++
++    *plinkOK = (phydata & BIT_2) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_speed_get(
++    IN  HANDLE hDevice,
++    OUT UINT16 *pSpeed
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    UINT8 speed_grp = 0;
++    UINT8 speed = NO_LINK;
++
++//    int i = 0;
++
++    BOOL linkOK = FALSE;
++
++    status = Rtl8226b_is_link(hDevice, &linkOK);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (linkOK)
++    {
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA434, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        speed_grp = (phydata & (BIT_9 | BIT_10)) >> 9;
++        speed = (phydata & (BIT_4 | BIT_5)) >> 4;
++
++        switch(speed_grp)
++        {
++        case 0:
++        {
++            switch(speed)
++            {
++            case 0:
++                *pSpeed = LINK_SPEED_10M;
++                break;
++            case 1:
++                *pSpeed = LINK_SPEED_100M;
++                break;
++            case 2:
++                *pSpeed = LINK_SPEED_1G;
++                break;
++            case 3:
++                *pSpeed = LINK_SPEED_500M;
++                break;
++
++            default:
++                status = FAILURE;
++                break;
++            }
++            break;
++        }
++
++        case 1:
++        {
++            switch(speed)
++            {
++            case 1:
++                *pSpeed = LINK_SPEED_2P5G;
++                break;
++            case 3:
++                *pSpeed = LINK_SPEED_1G;        // 2.5G lite
++                break;
++            default:
++                status = FAILURE;
++                break;
++            }
++            break;
++        }
++
++        default:
++            status = FAILURE;
++            break;
++        }
++    }
++    else
++    {
++        *pSpeed = NO_LINK;
++    }
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_enable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_PMAPMD, 0, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (Enable)
++        phydata &= (~BIT_11);        // set as 0
++    else
++        phydata |= BIT_11;            // set as 1
++
++
++    status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_force_speed_set(
++    IN HANDLE hDevice,
++    IN UINT16 Speed
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata0 = 0, phydata1 = 0;
++    BOOL support = 0;
++
++    status = MmdPhyRead(hDevice, MMD_PMAPMD, 0, &phydata0);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata0 &= (~(BIT_6 | BIT_13));
++
++    switch(Speed)
++    {
++    case 10:
++        support = TRUE;
++        phydata0 &= (~BIT_6);
++        phydata0 &= (~BIT_13);
++        break;
++
++    case 100:
++        support = TRUE;
++        phydata0 &= (~BIT_6);
++        phydata0 |= BIT_13;
++        break;
++
++    
++
++    default:
++        status = FAILURE;
++        support = FALSE;
++        break;
++    }
++
++    if (support)
++    {
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA5B4, &phydata1);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata1 |= (BIT_15);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA5B4, phydata1);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0, phydata0);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = Rtl8226b_autoNegoEnable_set(hDevice, FALSE);
++        if (status != SUCCESS)
++            goto exit;
++    }
++    else
++        status = FAILURE;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_force_speed_get(
++    IN  HANDLE hDevice,
++    OUT UINT16 *force_speed
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++	BOOL AnEnable = 0;
++	
++	status = Rtl8226b_autoNegoEnable_get(hDevice, &AnEnable);
++    if (status != SUCCESS)
++        goto exit;
++	
++
++  
++    if(AnEnable==0)
++	{
++		status = MmdPhyRead(hDevice, MMD_PMAPMD, 0, &phydata);
++		if (status != SUCCESS)
++			goto exit;
++
++		if(((phydata & (BIT_6))==0 )&&((phydata & (BIT_13))==0))
++			*force_speed = LINK_SPEED_10M;
++				   
++		else if(((phydata &(BIT_6))==0 )&&((phydata & (BIT_13))==BIT_13))
++			*force_speed = LINK_SPEED_100M;		
++		else 
++			*force_speed = NO_LINK;
++		
++	}
++	else
++		status = FAILURE;
++
++exit:
++    return status;
++}
++
++
++
++
++
++BOOLEAN
++Rtl8226b_greenEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x8011);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA438, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_15) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_greenEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x8011);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA438, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (Enable)
++        phydata |= (BIT_15);
++    else
++        phydata &= (~BIT_15);
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA438, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++
++
++
++BOOLEAN
++Rtl8226b_eeeEnable_get(
++    IN  HANDLE hDevice,
++    OUT PHY_EEE_ENABLE *pEeeEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_AN, 60, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    pEeeEnable->EEE_100 = (phydata & BIT_1) ? (TRUE) : (FALSE);
++    pEeeEnable->EEE_1000 = (phydata & BIT_2) ? (TRUE) : (FALSE);
++
++    status = MmdPhyRead(hDevice, MMD_AN, 62, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    pEeeEnable->EEE_2_5G = (phydata & BIT_0) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_eeeEnable_set(
++    IN HANDLE hDevice,
++    IN PHY_EEE_ENABLE *pEeeEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    BOOL AnEnable = 0;
++
++    status = Rtl8226b_autoNegoEnable_get(hDevice, &AnEnable);
++    if (status != SUCCESS)
++        goto exit;
++
++    // 100M/1G EEE
++    status = MmdPhyRead(hDevice, MMD_AN, 60, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (pEeeEnable->EEE_100)
++        phydata |= BIT_1;
++    else
++        phydata &= (~BIT_1);
++
++
++    if (pEeeEnable->EEE_1000)
++        phydata |= BIT_2;
++    else
++        phydata &= (~BIT_2);
++
++    status = MmdPhyWrite(hDevice, MMD_AN, 60, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    // 2.5G EEE
++    status = MmdPhyRead(hDevice, MMD_AN, 62, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (pEeeEnable->EEE_2_5G)
++        phydata |= BIT_0;
++    else
++        phydata &= (~BIT_0);
++
++    status = MmdPhyWrite(hDevice, MMD_AN, 62, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    // RestartAutoNegotiation
++    if (AnEnable)
++    {
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA400, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= BIT_9;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA400, phydata);
++        if (status != SUCCESS)
++            goto exit;
++    }
++
++exit:
++    return status;
++}
++
++
++
++
++
++BOOLEAN
++Rtl8226b_PHYmodeEEE_set(IN HANDLE hDevice,int on_off)
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++	if(on_off){
++		
++		 status = MmdPhyRead(hDevice, MMD_VEND2, 0xA432, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= BIT_5;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA432, phydata);
++        if (status != SUCCESS)
++            goto exit;
++		
++		
++	}
++	else{
++		 status = MmdPhyRead(hDevice, MMD_VEND2, 0xA432, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~BIT_5);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA432, phydata);
++        if (status != SUCCESS)
++            goto exit;
++		
++	}
++	
++	  status = MmdPhyRead(hDevice, MMD_VEND2, 0xA400, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= BIT_9;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA400, phydata);
++        if (status != SUCCESS)
++            goto exit;
++	
++	
++		
++
++exit:
++ return status;
++
++
++}
++
++BOOLEAN
++Rtl8226b_10M_PHYmodeEEEP_set(IN HANDLE hDevice,int on_off)
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0; 
++	if(on_off){
++		
++		 status = MmdPhyRead(hDevice, MMD_VEND2, 0xA432, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= BIT_2;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA432, phydata);
++        if (status != SUCCESS)
++            goto exit;
++		
++		
++		 status = MmdPhyRead(hDevice, MMD_VEND2, 0xC842, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= BIT_2;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC842, phydata);
++        if (status != SUCCESS)
++            goto exit;
++		
++		
++		
++		
++		
++	}
++	else{
++		 status = MmdPhyRead(hDevice, MMD_VEND2, 0xA432, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~BIT_2);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA432, phydata);
++        if (status != SUCCESS)
++            goto exit;
++		
++		 status = MmdPhyRead(hDevice, MMD_VEND2, 0xC842, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++          phydata &= (~BIT_2);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC842, phydata);
++        if (status != SUCCESS)
++            goto exit;
++		
++		
++		
++	}
++	
++	  status = MmdPhyRead(hDevice, MMD_VEND2, 0xA400, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= BIT_9;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA400, phydata);
++        if (status != SUCCESS)
++            goto exit;
++	
++	
++		
++
++exit:
++ return status;
++
++
++}
++
++
++
++
++BOOLEAN
++Rtl8226b_crossOverMode_get(
++    IN  HANDLE hDevice,
++    OUT PHY_CROSSPVER_MODE *CrossOverMode
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA430, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if((phydata & BIT_9) >> 9)
++    {
++        switch((phydata & BIT_8) >> 8)
++        {
++        case 1:
++            *CrossOverMode = PHY_CROSSPVER_MODE_MDI;
++            break;
++        case 0:
++            *CrossOverMode = PHY_CROSSPVER_MODE_MDIX;
++            break;
++        default:
++            status = FAILURE;
++            break;
++        }
++    }
++    else
++        *CrossOverMode = PHY_CROSSPVER_MODE_AUTO;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_crossOverMode_set(
++    IN HANDLE hDevice,
++    IN PHY_CROSSPVER_MODE CrossOverMode
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA430, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata &= (~(BIT_8 | BIT_9));
++
++    switch(CrossOverMode)
++    {
++    case PHY_CROSSPVER_MODE_MDI:
++        phydata |= (BIT_8 | BIT_9);
++        break;
++    case PHY_CROSSPVER_MODE_MDIX:
++        phydata |= BIT_9;
++        break;
++    case PHY_CROSSPVER_MODE_AUTO:
++        break;
++    default:
++        status = FAILURE;
++        goto exit;
++    }
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA430, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_crossOverStatus_get(
++    IN  HANDLE hDevice,
++    OUT PHY_CROSSPVER_STATUS *pCrossOverStatus
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA434, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pCrossOverStatus = (phydata & BIT_1) ? (PHY_CROSSPVER_STATUS_MDI) : (PHY_CROSSPVER_STATUS_MDIX);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_masterSlave_get(
++    IN  HANDLE hDevice,
++    OUT PHY_MASTERSLAVE_MODE *MasterSlaveMode
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_AN, 33, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    switch((phydata >> 14) & 0x3)
++    {
++    case 0: // 0:Slave, 1:Master
++        *MasterSlaveMode = PHY_SLAVE_MODE;
++        break;
++    case 1:
++        *MasterSlaveMode = PHY_MASTER_MODE;
++        break;
++    default:
++        status = FAILURE;
++        break;
++    }
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_masterSlave_set(
++    IN HANDLE hDevice,
++    IN PHY_MASTERSLAVE_MODE MasterSlaveMode
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_AN, 32, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata &= (~(BIT_14 | BIT_15));
++
++    switch(MasterSlaveMode)
++    {
++    case PHY_AUTO_MODE:
++        break;
++    case PHY_SLAVE_MODE:
++        phydata |= BIT_15;
++        break;
++    case PHY_MASTER_MODE:
++        phydata |= (BIT_14 | BIT_15);
++        break;
++    default:
++        status = FAILURE;
++        goto exit;
++    }
++
++    status = MmdPhyWrite(hDevice, MMD_AN, 32, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_loopback_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_PCS, 0x0, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_14) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_loopback_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_PCS, 0x0, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (Enable)
++        phydata |= BIT_14;
++    else
++        phydata &= (~BIT_14);
++
++    status = MmdPhyWrite(hDevice, MMD_PCS, 0x0, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_downSpeedEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA442, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_3) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_downSpeedEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA442, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata &= (~BIT_5);
++
++    if (Enable)
++        phydata |= BIT_3;
++    else
++        phydata &= (~BIT_3);
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA442, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_gigaLiteEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA428, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_9) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_gigaLiteEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata0 = 0, phydata1 = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA442, &phydata0);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA428, &phydata1);
++    if (!status)
++        goto exit;
++
++    if (Enable)
++    {
++        phydata0 |= (BIT_2 | BIT_9);
++        phydata1 |= BIT_9;
++    }
++    else
++    {
++        phydata0 &= (~(BIT_2 | BIT_9));
++        phydata1 &= (~BIT_9);
++    }
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA442, phydata0);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA428, phydata1);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++
++
++
++BOOLEAN
++Rtl8226b_mdiSwapEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND1, 0x6A21, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_5) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_mdiSwapEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata0 = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND1, 0x6A21, &phydata0);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (Enable)
++    {
++        phydata0 |= (BIT_5);
++    }
++    else
++    {
++        phydata0 &= (~(BIT_5));
++    }
++
++    status = MmdPhyWrite(hDevice, MMD_VEND1, 0x6A21, phydata0);
++    if (status != SUCCESS)
++        goto exit;
++
++
++exit:
++    return status;
++}
++
++
++
++
++BOOLEAN
++Rtl8226b_rtct_start(
++    IN HANDLE hDevice
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++    BOOL linkOK;
++    UINT16 Speed;
++
++    status = Rtl8226b_is_link(hDevice, &linkOK);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (linkOK)
++    {
++        status = Rtl8226b_speed_get(hDevice, &Speed);
++        if (status != SUCCESS)
++            goto exit;
++
++        //RTCT is not supported when port link at 10M.
++        if (Speed == 10)
++        {
++            osal_printf("RTCT is not supported when port link at 10M.\n");
++            status = FAILURE;
++            goto exit;
++        }
++    }
++    else
++    {
++        // MMD 31.0xA422[15] = 0    // clear rtct_done
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA422, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~BIT_15);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA422, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // wait 1ms for chip reset the states
++        Sleep(1);
++
++        // MMD 31.0xA422[4] = 1    // RTCT_CH_A
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA422, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= (BIT_4);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA422, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA422[5] = 1    // RTCT_CH_B
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA422, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= (BIT_5);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA422, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA422[6] = 1    // RTCT_CH_C
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA422, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= (BIT_6);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA422, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA422[7] = 1    // RTCT_CH_D
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA422, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= (BIT_7);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA422, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA422[0] = 1    // RTCT_ENABLE
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA422, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= (BIT_0);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA422, phydata);
++        if (status != SUCCESS)
++            goto exit;
++    }
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_rtctResult_convert(
++    IN UINT16 phydata,
++    OUT PHY_RTCT_STATUS *pRtctStatus
++    )
++{
++    BOOL status = SUCCESS;
++
++    switch(phydata)
++    {
++    case 0x60: // Normal
++        break;
++    case 0x48:
++        pRtctStatus->Open = TRUE;
++        break;
++    case 0x50:
++        pRtctStatus->Short = TRUE;
++        break;
++    case 0x42:
++        pRtctStatus->Mismatch = MIS_MATCH_OPEN;
++        break;
++    case 0x44:
++        pRtctStatus->Mismatch = MIS_MATCH_SHORT;
++        break;
++
++    default:
++        status = FAILURE;
++        break;
++    }
++
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_rtctResult_get(
++    IN HANDLE hDevice,
++    OUT PHY_RTCT_RESULT *pRtctResult
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    BOOL linkOK = FALSE;
++
++    UINT16 Speed = NO_LINK;
++
++    BOOL rtct_done;
++
++    status = Rtl8226b_is_link(hDevice, &linkOK);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (linkOK)
++    {
++        status = Rtl8226b_speed_get(hDevice, &Speed);
++        if (status != SUCCESS)
++            goto exit;
++
++       pRtctResult->linkType = Speed;
++        if (Speed == 10)
++        {
++            osal_printf("RTCT is not supported when port link at 10M.\n");
++            status = FAILURE;
++            goto exit;
++        }
++        switch(Speed)
++        {
++        case LINK_SPEED_100M:
++            // rxLen = MMD 31.0xA880[7:0] * 100    // unit is meter
++            // txLen = MMD 31.0xA880[7:0] * 100
++            status = MmdPhyRead(hDevice, MMD_VEND2, 0xA880, &phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            pRtctResult->rxLen = (phydata & 0xff) * 100;
++            pRtctResult->txLen = (phydata & 0xff) * 100;
++            break;
++
++        case LINK_SPEED_1G:
++            // channelALen = MMD 31.0xA880[7:0] * 100    // unit is meter
++            // channelBLen = MMD 31.0xA880[7:0] * 100
++            // channelCLen = MMD 31.0xA880[7:0] * 100
++            // channelDLen = MMD 31.0xA880[7:0] * 100
++            status = MmdPhyRead(hDevice, MMD_VEND2, 0xA880, &phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            pRtctResult->channelALen = (phydata & 0xff) * 100;
++            pRtctResult->channelBLen = (phydata & 0xff) * 100;
++            pRtctResult->channelCLen = (phydata & 0xff) * 100;
++            pRtctResult->channelDLen = (phydata & 0xff) * 100;
++            break;
++
++        case LINK_SPEED_2P5G:
++            //channelALen = MMD 31.0xACBA[9:2] * 100        // cablen for XG
++            status = MmdPhyRead(hDevice, MMD_VEND2, 0xACBA, &phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            pRtctResult->channelALen = ((phydata & 0x3fc) >> 2 ) * 100;
++            pRtctResult->channelBLen = ((phydata & 0x3fc) >> 2 ) * 100;
++            pRtctResult->channelCLen = ((phydata & 0x3fc) >> 2 ) * 100;
++            pRtctResult->channelDLen = ((phydata & 0x3fc) >> 2 ) * 100;
++            break;
++
++        //RTCT is not supported when port link at 10M.
++        default:
++            status = FAILURE;
++            break;
++        }
++    }
++    else
++    {
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA422, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        rtct_done = (phydata & BIT_15) ? (TRUE) : (FALSE);
++        if (!rtct_done)
++        {
++            status = FAILURE;
++            goto exit;
++        }
++
++        // MMD 31.0A436[15:0] = 0x8029
++        // phyData = read MMD 31.0A438[15:0]
++        // channelALen = phyData * 100 / 80
++        // channelALen (unit: cm)
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x8029);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0x0A438, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        pRtctResult->channelALen = (phydata * 100) / 80;
++
++        // MMD 31.0A436[15:0] = 0x802D
++        // phyData = read MMD 31.0A438[15:0]
++        // channelBLen = phyData * 100 / 80
++        // channelBLen (unit: cm)
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x802D);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0x0A438, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        pRtctResult->channelBLen = (phydata * 100) / 80;
++
++        // MMD 31.0A436[15:0] = 0x8031
++        // phyData = read MMD 31.0A438[15:0]
++        // channelCLen = phyData * 100 / 80
++        // channelCLen (unit: cm)
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x8031);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0x0A438, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        pRtctResult->channelCLen = (phydata * 100) / 80;
++
++        // MMD 31.0A436[15:0] = 0x8035
++        // phyData = read MMD 31.0A438[15:0]
++        // channelDLen = phyData * 100 / 80
++        // channelDLen (unit: cm)
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x8035);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0x0A438, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        pRtctResult->channelDLen = (phydata * 100) / 80;
++
++        // channelA status
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x8027);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0x0A438, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = Rtl8226b_rtctResult_convert(phydata, &pRtctResult->channelAStatus);
++        if (status != SUCCESS)
++            goto exit;
++
++        // channelA status
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x802B);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0x0A438, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = Rtl8226b_rtctResult_convert(phydata, &pRtctResult->channelBStatus);
++        if (status != SUCCESS)
++            goto exit;
++
++        // channelC status
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x802F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0x0A438, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = Rtl8226b_rtctResult_convert(phydata, &pRtctResult->channelCStatus);
++        if (status != SUCCESS)
++            goto exit;
++
++        // channelD status
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x8033);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0x0A438, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = Rtl8226b_rtctResult_convert(phydata, &pRtctResult->channelDStatus);
++        if (status != SUCCESS)
++            goto exit;
++    }
++
++exit:
++    return status;
++}
++
++
++
++
++BOOLEAN
++Rtl8226b_rtctdone_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *prtct_done
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA422, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++      *prtct_done = (phydata & BIT_15) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++
++   
++
++BOOLEAN
++Rtl8226b_linkDownPowerSavingEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA430, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_2) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_linkDownPowerSavingEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA430, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (Enable)
++        phydata |= BIT_2;
++    else
++        phydata &= (~BIT_2);
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA430, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_2p5gLiteEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA5EA, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_0) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_2p5gLiteEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata0 = 0, phydata1 = 0, phydata2 = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA442, &phydata0);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA5FA, &phydata1);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA5EA, &phydata2);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata0 &= (~BIT_2);
++    phydata1 &= (~BIT_1);
++    phydata2 &= (~BIT_0);
++
++    if (Enable)
++    {
++        phydata0 |= BIT_2;
++        phydata1 |= BIT_1;
++        phydata2 |= BIT_0;
++    }
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA442, phydata0);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA5FA, phydata1);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA5EA, phydata2);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_ThermalSensorEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x817D);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA438, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *pEnable = (phydata & BIT_12) ? (TRUE) : (FALSE);
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_ThermalSensorEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable,
++    IN UINT16 threshold
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x817D);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA438, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (Enable)
++        phydata |= BIT_12;
++    else
++        phydata &= (~BIT_12);
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA438, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    //Set the thermal thershold, default = 120 degree C
++    if(threshold <= 120)
++    {
++      status = MmdPhyRead(hDevice, MMD_VEND2, 0xB54C, &phydata);
++      if (status != SUCCESS)
++          goto exit;
++
++      phydata &= (~(BIT_15 | BIT_14 | BIT_13 | BIT_12 | BIT_11 | BIT_10 | BIT_9 | BIT_8 | BIT_7 | BIT_6));
++      phydata |= ((threshold * 2) << 6);
++
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xB54C, phydata);
++      if (status != SUCCESS)
++          goto exit;
++    }else
++    {
++     status = FAILURE;
++    }
++
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_ieeeTestMode_set(
++    IN HANDLE hDevice,
++    IN UINT16 Speed,
++    IN PHY_IEEE_TEST_MODE *pIEEEtestmode
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0, phydata_w = 0, phydata2 = 0;
++
++    switch(Speed)
++    {
++   case LINK_SPEED_10M:
++    {
++        //initial setting
++        //Write MMD1, reg 0x0000, data=0x0000
++        status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0x0000, 0x0000);
++        if (status != SUCCESS)
++            goto exit;
++
++        // wait 1ms
++        Sleep(1);
++
++        //Write MMD7, reg 0x0000, bit[12]=0x0
++        status = MmdPhyRead(hDevice, MMD_AN, 0x0000, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~BIT_12);
++
++        status = MmdPhyWrite(hDevice, MMD_AN, 0x0000, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // wait 1ms
++        Sleep(1);
++
++        //Write MMD31, reg 0xA412, bit[15:13]=0x0
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA412, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~(BIT_15 | BIT_14 | BIT_13));
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA412, phydata);
++        if (status != SUCCESS)
++             goto exit;
++
++        // wait 1ms
++        Sleep(1);
++
++        if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_A)
++            Rtl8226b_crossOverMode_set(hDevice,PHY_CROSSPVER_MODE_MDI);
++        else if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_B)
++            Rtl8226b_crossOverMode_set(hDevice,PHY_CROSSPVER_MODE_MDIX);
++
++        if(pIEEEtestmode -> NORMAL)
++        {
++          //Write MMD31, reg 0xC804, data=0x0115
++          status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC804, 0x0115);
++          if (status != SUCCESS)
++             goto exit;
++
++          //Write MMD31, reg 0xC800, data=0x5a21
++          status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC800, 0x5a21);
++          if (status != SUCCESS)
++             goto exit;
++        }
++
++        if(pIEEEtestmode -> HARMONIC)
++        {
++          //Write MMD31, reg 0xC804, data=0x0015
++          status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC804, 0x0015);
++          if (status != SUCCESS)
++             goto exit;
++
++          //Write MMD31, reg 0xC800, data=0xff21
++          status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC800, 0xff21);
++          if (status != SUCCESS)
++             goto exit;
++        }
++
++        if(pIEEEtestmode -> LINKPLUSE)
++        {
++          //Write MMD31, reg 0xC804, data=0x0115
++          status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC804, 0x0115);
++          if (status != SUCCESS)
++             goto exit;
++
++          //Write MMD31, reg 0xC800, data=0x5a00
++          status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC800, 0x5a00);
++          if (status != SUCCESS)
++             goto exit;
++        }
++
++        if (pIEEEtestmode->TMFINISH)
++        {
++            //MMD31, reg 0xA430, bit[9:8]=0x0
++             Rtl8226b_crossOverMode_set(hDevice,PHY_CROSSPVER_MODE_AUTO);
++
++            // wait 1ms
++            Sleep(1);
++
++           //Write MMD31, reg 0xC804, data=0x0115
++           status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC804, 0x0115);
++           if (status != SUCCESS)
++              goto exit;
++
++            // wait 1ms
++            Sleep(1);
++
++           //Write MMD31, reg 0xC800, data=0x5a00
++           status = MmdPhyWrite(hDevice, MMD_VEND2, 0xC800, 0x5a00);
++           if (status != SUCCESS)
++             goto exit;
++
++            // wait 1ms
++            Sleep(1);
++
++            //Write MMD7, reg 0x0000, bit[12]=0x1
++            status = MmdPhyRead(hDevice, MMD_AN, 0x0000, &phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            phydata |= BIT_12;
++
++            status = MmdPhyWrite(hDevice, MMD_AN, 0x0000, phydata);
++            if (status != SUCCESS)
++				goto exit;
++            // wait 1ms
++            Sleep(1);
++
++            //Write MMD1, reg 0x0000, bit[15]=0x1, PMA reset
++            status = MmdPhyRead(hDevice, MMD_PMAPMD, 0x0000, &phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            phydata |= BIT_15;
++
++            status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0x0000, phydata);
++            if (status != SUCCESS)
++                  goto exit;
++        }
++
++        break;
++    }
++    case LINK_SPEED_100M:
++    {
++        //initial setting
++        //Write MMD1, reg 0x0000, data=0x2000
++        status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0x0000, 0x2000);
++        if (status != SUCCESS)
++			goto exit;
++        // wait 1ms
++        Sleep(1);
++
++        //Write MMD7, reg 0x0000, bit[12]=0x0
++        status = MmdPhyRead(hDevice, MMD_AN, 0x0000, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~BIT_12);
++
++        status = MmdPhyWrite(hDevice, MMD_AN, 0x0000, phydata);
++        if (status != SUCCESS)
++				goto exit;
++        // wait 1ms
++        Sleep(1);
++
++        //Write MMD31, reg 0xA412, bit[15:13]=0x0
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA412, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~(BIT_15 | BIT_14 | BIT_13));
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA412, phydata);
++        if (status != SUCCESS)
++             goto exit;
++
++        // wait 1ms
++        Sleep(1);
++
++        if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_A)
++            Rtl8226b_crossOverMode_set(hDevice,PHY_CROSSPVER_MODE_MDI);
++        else if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_B)
++            Rtl8226b_crossOverMode_set(hDevice,PHY_CROSSPVER_MODE_MDIX);
++
++
++        if (pIEEEtestmode->TMFINISH)
++        {
++            //MMD31, reg 0xA430, bit[9:8]=0x0
++             Rtl8226b_crossOverMode_set(hDevice,PHY_CROSSPVER_MODE_AUTO);
++
++            // wait 1ms
++            Sleep(1);
++
++            //Write MMD7, reg 0x0000, bit[12]=0x1
++            status = MmdPhyRead(hDevice, MMD_AN, 0x0000, &phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            phydata |= BIT_12;
++
++            status = MmdPhyWrite(hDevice, MMD_AN, 0x0000, phydata);
++            if (status != SUCCESS)
++				goto exit;
++            // wait 1ms
++            Sleep(1);
++
++            //Write MMD1, reg 0x0000, bit[15]=0x1, PMA reset
++            status = MmdPhyRead(hDevice, MMD_PMAPMD, 0x0000, &phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            phydata |= BIT_15;
++
++            status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0x0000, phydata);
++            if (status != SUCCESS)
++                  goto exit;
++        }
++
++        break;
++    }
++    case LINK_SPEED_1G:
++    {
++        //initial setting
++        //Write MMD1, reg 0x0000, bit[15]=0x1, PMA reset
++        status = MmdPhyRead(hDevice, MMD_PMAPMD, 0x0000, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++         phydata |= BIT_15;
++
++        status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0x0000, phydata);
++         if (status != SUCCESS)
++				goto exit;
++        // wait 1ms
++         Sleep(1);
++
++        //Write MMD7, reg 0x0000, bit[12]=0x1
++        status = MmdPhyRead(hDevice, MMD_AN, 0x0000, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++         phydata |= BIT_12;
++
++        status = MmdPhyWrite(hDevice, MMD_AN, 0x0000, phydata);
++         if (status != SUCCESS)
++				goto exit;
++        // wait 1ms
++         Sleep(1);
++
++       //Config channel
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xBD2C, &phydata);
++                if (status != SUCCESS)
++                    goto exit;
++
++                status = MmdPhyRead(hDevice, MMD_VEND2, 0xBD32, &phydata2);
++                if (status != SUCCESS)
++                    goto exit;
++
++                if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_NONE){
++                    phydata &= (~(BIT_10));
++                }
++                else{
++                    phydata |= BIT_10;
++
++                    if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_A)
++                        phydata_w = 1 << 8;
++                    else if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_B)
++                        phydata_w = 2 << 8;
++                    else if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_C)
++                        phydata_w = 4 << 8;
++                    else if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_D)
++                        phydata_w = 8 << 8;
++
++                    phydata2 &= (~(BIT_11 | BIT_10 | BIT_9 | BIT_8));
++                    phydata2 |= phydata_w;
++                }
++
++                status = MmdPhyWrite(hDevice, MMD_VEND2, 0xBD32, phydata2);
++                if (status != SUCCESS)
++                    goto exit;
++
++                status = MmdPhyWrite(hDevice, MMD_VEND2, 0xBD2C, phydata);
++                if (status != SUCCESS)
++                    goto exit;
++
++        //1G Test Mode
++        if (pIEEEtestmode->TM1)
++        {
++            status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA412, 0x2000);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        if (pIEEEtestmode->TM2)
++        {
++            status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA412, 0x4000);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        if (pIEEEtestmode->TM4)
++        {
++            status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA412, 0x8000);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        if (pIEEEtestmode->TMFINISH)
++        {
++            status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA412, 0x0000);
++            if (status != SUCCESS)
++                goto exit;
++
++            status = MmdPhyRead(hDevice, MMD_VEND2, 0xBD2C, &phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            phydata &= (~(BIT_10));
++
++            status = MmdPhyWrite(hDevice, MMD_VEND2, 0xBD2C, phydata);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        break;
++    }
++
++    case LINK_SPEED_2P5G:
++    {
++        //initial setting
++        //Write MMD7, reg 0x0000, bit[12]=0x1
++        status = MmdPhyRead(hDevice, MMD_AN, 0x0000, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++         phydata |= BIT_12;
++
++         status = MmdPhyWrite(hDevice, MMD_AN, 0x0000, phydata);
++         if (status != SUCCESS)
++				goto exit;
++          // wait 1ms
++          Sleep(1);
++
++        //Write MMD31, reg 0xA412, bit[15:13]=0x0
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xA412, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~(BIT_15 | BIT_14 | BIT_13));
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA412, phydata);
++        if (status != SUCCESS)
++				goto exit;
++          // wait 1ms
++          Sleep(1);
++
++         //Write MMD1, reg 0x0000, data 0x2058
++          status = MmdPhyWrite(hDevice, MMD_PMAPMD, 0x0000, 0x2058);
++          if (status != SUCCESS)
++             goto exit;
++
++          // wait 1ms
++          Sleep(1);
++
++        //Config channel
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xBD2C, &phydata);
++                if (status != SUCCESS)
++                    goto exit;
++
++                status = MmdPhyRead(hDevice, MMD_VEND2, 0xBD32, &phydata2);
++                if (status != SUCCESS)
++                    goto exit;
++
++                if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_NONE){
++                    phydata &= (~(BIT_8));
++                }
++                else{
++                    phydata |= BIT_8;
++
++                    if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_A)
++                        phydata_w = 1;
++                    else if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_B)
++                        phydata_w = 2;
++                    else if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_C)
++                        phydata_w = 4;
++                    else if(pIEEEtestmode -> channel == TESTMODE_CHANNEL_D)
++                        phydata_w = 8;
++
++                    phydata2 &= (~(BIT_3 | BIT_2 | BIT_1 | BIT_0));
++                    phydata2 |= phydata_w;
++                }
++
++                status = MmdPhyWrite(hDevice, MMD_VEND2, 0xBD32, phydata2);
++                if (status != SUCCESS)
++                    goto exit;
++
++                status = MmdPhyWrite(hDevice, MMD_VEND2, 0xBD2C, phydata);
++                if (status != SUCCESS)
++                    goto exit;
++
++
++        // 2.5G Test Mode
++        if (pIEEEtestmode->TM1)
++        {
++            status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0x2400);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        if (pIEEEtestmode->TM2)
++        {
++            status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0x4400);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        if (pIEEEtestmode->TM3)
++        {
++            status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0x6400);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        if (pIEEEtestmode->TM4)
++        {
++            if (pIEEEtestmode->TONE1)
++            {
++                status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0x8400);
++                if (status != SUCCESS)
++                    goto exit;
++            }
++
++            if (pIEEEtestmode->TONE2)
++            {
++                status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0x8800);
++                if (status != SUCCESS)
++                    goto exit;
++            }
++
++            if (pIEEEtestmode->TONE3)
++            {
++                status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0x9000);
++                if (status != SUCCESS)
++                    goto exit;
++            }
++
++            if (pIEEEtestmode->TONE4)
++            {
++                status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0x9400);
++                if (status != SUCCESS)
++                    goto exit;
++            }
++
++            if (pIEEEtestmode->TONE5)
++            {
++                status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0x9800);
++                if (status != SUCCESS)
++                    goto exit;
++            }
++        }
++
++        if (pIEEEtestmode->TM5)
++        {
++            status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0xA400);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        if (pIEEEtestmode->TM6)
++        {
++            status = MmdPhyWrite(hDevice, MMD_PMAPMD, 132, 0xC400);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        if (pIEEEtestmode->TMFINISH)
++        {
++            status = MmdPhyRead(hDevice, MMD_VEND2, 0xBD2C, &phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            phydata &= (~(BIT_8));
++
++            status = MmdPhyWrite(hDevice, MMD_VEND2, 0xBD2C, phydata);
++            if (status != SUCCESS)
++                goto exit;
++
++            //re-nway and set phy_rst)
++            status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA400, 0x9200);
++            if (status != SUCCESS)
++                goto exit;
++        }
++
++        break;
++    }
++    default:
++        break;
++    }
++
++
++
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_serdes_rst(
++    IN HANDLE hDevice
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND1, 0x7581, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata &= (~BIT_4);
++
++    status = MmdPhyWrite(hDevice, MMD_VEND1, 0x7581, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    // wait 1ms
++    Sleep(1);
++
++    status = MmdPhyRead(hDevice, MMD_VEND1, 0x7581, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata |= BIT_4;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND1, 0x7581, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    // wait 1ms
++    Sleep(1);
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_serdes_link_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *perdesLink,
++    OUT PHY_SERDES_MODE *SerdesMode
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++        // serdes link
++    status = MmdPhyRead(hDevice, MMD_VEND1, 0x758D, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    *perdesLink = (phydata & BIT_1) ? (TRUE) : (FALSE);
++
++	status = MmdPhyRead(hDevice, MMD_VEND1, 0x758B, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    phydata &= BIT_0;
++
++	if (phydata == 1){
++
++        //serdes mode
++        status = MmdPhyRead(hDevice, MMD_VEND1, 0x7580, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (BIT_4 | BIT_3 | BIT_2 | BIT_1 | BIT_0);
++
++        if(phydata == 2)
++                *SerdesMode = PHY_SERDES_MODE_SGMII;
++            else if(phydata == 13)
++                *SerdesMode = PHY_SERDES_MODE_USXGMII;
++            else if(phydata == 18)
++                *SerdesMode = PHY_SERDES_MODE_HiSGMII;
++            else if(phydata == 22)
++                *SerdesMode = PHY_SERDES_MODE_2500BASEX;
++            else if(phydata == 31)
++                *SerdesMode = PHY_SERDES_MODE_NO_SDS;
++            else
++                *SerdesMode = PHY_SERDES_MODE_OTHER;
++	}
++	else{
++		*SerdesMode = PHY_SERDES_MODE_NO_SDS;
++	}
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_serdes_option_set(
++    IN HANDLE hDevice,
++    IN UINT8 functioninput
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    if ((functioninput >= 0) && (functioninput <= 5))
++    {
++        status = MmdPhyRead(hDevice, MMD_VEND1, 0x697A, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~(BIT_0 | BIT_1 | BIT_2 | BIT_3 | BIT_4 | BIT_5));
++        phydata |= functioninput;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND1, 0x697A, phydata);
++        if (status != SUCCESS)
++            goto exit;
++    }
++
++exit:
++    return status;
++}
++
++
++BOOLEAN
++Rtl8226b_serdes_option_get(
++    IN HANDLE hDevice,
++    OUT PHY_SERDES_OPTION *SerdesOption
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++        //serdes option
++        status = MmdPhyRead(hDevice, MMD_VEND1, 0x697A, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (BIT_5 |BIT_4 | BIT_3 | BIT_2 | BIT_1 | BIT_0);
++
++        if(phydata == 0)
++                *SerdesOption = PHY_SERDES_OPTION_2500BASEX_SGMII;
++            else if(phydata == 1)
++                *SerdesOption = PHY_SERDES_OPTION_HiSGMII_SGMII;
++            else if(phydata == 2)
++                *SerdesOption = PHY_SERDES_OPTION_2500BASEX;
++            else if(phydata == 3)
++                *SerdesOption = PHY_SERDES_OPTION_HiSGMII;
++            else
++                *SerdesOption = PHY_SERDES_OPTION_OTHER;
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_serdes_polarity_swap(
++    IN HANDLE hDevice,
++    IN PHY_SERDES_POLARITY_SWAP *ppolarityswap
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND1, 0x7588, 0x0);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (ppolarityswap->TX_SWAP && ppolarityswap->RX_SWAP)
++        phydata = 0x1703;
++    else if (ppolarityswap->TX_SWAP)
++        phydata = 0x1503;
++    else if (ppolarityswap->RX_SWAP)
++        phydata = 0x1603;
++    else
++        phydata = 0x1403;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND1, 0x7589, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND1, 0x7587, 0x0003);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_serdes_autoNego_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND1, 0x7588, 0x0002);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (Enable)
++        phydata = 0x70D0;
++    else
++        phydata = 0x71D0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND1, 0x7589, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND1, 0x7587, 0x0003);
++    if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_wol_set(
++    IN HANDLE hDevice,
++    IN PHY_WOL_EVENT *pwolevent
++    )
++{
++    BOOL status = FAILURE;
++    BOOL linkOK;
++    UINT16 speed;
++    UINT16 phydata = 0, phydata2=0;
++
++    status = Rtl8226b_is_link(hDevice, &linkOK);
++    if (status != SUCCESS)
++        goto exit;
++
++    if (linkOK)
++    {
++        status = Rtl8226b_speed_get(hDevice, &speed);
++        if (status != SUCCESS)
++            goto exit;
++
++        //WOL is not supported when port link at 2.5G.
++        if (speed == LINK_SPEED_2P5G)
++        {
++            osal_printf("WOL/PME is not supported when port link at 2.5G.\n");
++            status = FAILURE;
++            goto exit;
++        }
++     }
++
++    //Set INTB/PMEB pinas PMEB(optional) MMD31, reg 0xD05C, bit0=1
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xD05C, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++     phydata |= BIT_0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD05C, phydata);
++     if (status != SUCCESS)
++        goto exit;
++
++    // wait 1ms
++     Sleep(1);
++
++    //Set MAC address  MMD31, reg 0xD8C0,0xD8C2,0xD8C4
++     status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8C0, pwolevent->macaddress.ADDR15_0);
++     if (status != SUCCESS)
++        goto exit;
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8C2, pwolevent->macaddress.ADDR31_16);
++     if (status != SUCCESS)
++        goto exit;
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8C4, pwolevent->macaddress.ADDR47_32);
++     if (status != SUCCESS)
++        goto exit;
++
++    //Set Max packet length MMD31, reg 0xD8A2
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8A2,  pwolevent->MAXPKTLENGTH);
++     if (status != SUCCESS)
++        goto exit;
++
++    //WOL event select and enable  MMD31, reg 0xD8A0
++     if(pwolevent->LINKCHG)
++      phydata2 |= BIT_13;
++     if(pwolevent->MAGIC)
++      phydata2 |= BIT_12;
++     if(pwolevent->ARBITRARY)
++      phydata2 |= BIT_11;
++     if(pwolevent->UNICAST)
++      phydata2 |= BIT_10;
++     if(pwolevent->MULTICAST)
++      phydata2 |= BIT_9;
++     if(pwolevent->BROADCAST)
++      phydata2 |= BIT_8;
++     if(pwolevent->FRAME7)
++      phydata2 |= BIT_7;
++     if(pwolevent->FRAME6)
++      phydata2 |= BIT_6;
++     if(pwolevent->FRAME5)
++      phydata2 |= BIT_5;
++     if(pwolevent->FRAME4)
++      phydata2 |= BIT_4;
++     if(pwolevent->FRAME3)
++      phydata2 |= BIT_3;
++     if(pwolevent->FRAME2)
++      phydata2 |= BIT_2;
++     if(pwolevent->FRAME1)
++      phydata2 |= BIT_1;
++     if(pwolevent->FRAME0)
++      phydata2 |= BIT_0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8A0,  phydata2);
++     if (status != SUCCESS)
++        goto exit;
++
++    if(pwolevent->MULTICAST)
++    {
++     //Set Multicast register  MMD31, reg 0xD8C6,0xD8C8,0xD8CA,0xD8CC
++     status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8C6, pwolevent->multicast.REG15_0);
++     if (status != SUCCESS)
++        goto exit;
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8C8, pwolevent->multicast.REG31_16);
++     if (status != SUCCESS)
++        goto exit;
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8CA, pwolevent->multicast.REG47_32);
++     if (status != SUCCESS)
++        goto exit;
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8CC, pwolevent->multicast.REG63_48);
++     if (status != SUCCESS)
++        goto exit;
++    }
++
++    //Set Wakeup Frame #0
++    if(pwolevent->FRAME0)
++    {
++      //Set Mask
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD800, pwolevent->wakeframe0.MASK15_0);
++       if (status != SUCCESS)
++          goto exit;
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD802, pwolevent->wakeframe0.MASK31_16);
++       if (status != SUCCESS)
++          goto exit;
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD804, pwolevent->wakeframe0.MASK47_32);
++       if (status != SUCCESS)
++          goto exit;
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD806, pwolevent->wakeframe0.MASK63_48);
++       if (status != SUCCESS)
++          goto exit;
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD808, pwolevent->wakeframe0.MASK79_64);
++       if (status != SUCCESS)
++          goto exit;
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD80A, pwolevent->wakeframe0.MASK95_80);
++       if (status != SUCCESS)
++          goto exit;
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD80C, pwolevent->wakeframe0.MASK111_96);
++       if (status != SUCCESS)
++          goto exit;
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD80E, pwolevent->wakeframe0.MASK127_112);
++       if (status != SUCCESS)
++          goto exit;
++
++      //Set CRC
++      status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD880, pwolevent->wakeframe0.CRC);
++       if (status != SUCCESS)
++          goto exit;
++      }
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_wol_exit(
++    IN HANDLE hDevice
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++    //Disable all WOL events
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8A0,  0x0000);
++     if (status != SUCCESS)
++        goto exit;
++
++    //WOL reset
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xD8A2, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++     phydata &= (~BIT_15);
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xD8A2, phydata);
++     if (status != SUCCESS)
++        goto exit;
++
++exit:
++    return status;
++}
++BOOLEAN
++Rtl8226b_ThermalSensor_get(
++    IN HANDLE hDevice,
++    OUT PHY_THERMAL_RESULT *pTsResult
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x817D);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA438, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    pTsResult->Enable = (phydata & BIT_12) ? (TRUE) : (FALSE);
++
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xBD84, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    pTsResult->Temperature = (phydata & 0x03ff)/2;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xB54C, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++     pTsResult->Temperature_threshold = ((phydata & 0xffc0)>>6)/2;
++
++exit:
++    return status;
++}
++
++BOOLEAN
++Rtl8226b_ThermalSensor_resume_2P5G(
++    IN HANDLE hDevice
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2,0xA662, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++        phydata &= (~(BIT_1 | BIT_0));
++
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA662, phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    //The setting will take effect after a link change event
++    Rtl8226b_enable_set(hDevice, FALSE);
++    Sleep (1);
++    Rtl8226b_enable_set(hDevice, TRUE);
++
++
++exit:
++    return status;
++}
+diff --git a/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b.h b/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b.h
+new file mode 100755
+index 000000000..d5e4a271c
+--- /dev/null
++++ b/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b.h
+@@ -0,0 +1,336 @@
++/*
++ * Copyright (C) 2019 Realtek Semiconductor Corp.
++ * All Rights Reserved.
++ *
++ * This program is the proprietary software of Realtek Semiconductor
++ * Corporation and/or its licensors, and only be used, duplicated,
++ * modified or distributed under the authorized license from Realtek.
++ *
++ * ANY USE OF THE SOFTWARE OTHER THAN AS AUTHORIZED UNDER
++ * THIS LICENSE OR COPYRIGHT LAW IS PROHIBITED.
++ *
++ * Purpose : PHY 8226 Driver
++ *
++ * Feature : PHY 8226 Driver
++ *
++ */
++#ifndef __NIC_RTL8226B_H__
++#define __NIC_RTL8226B_H__
++
++#include <hal/phy/nic_rtl8226/rtl8226_typedef.h>
++
++
++BOOLEAN
++Rtl8226b_ThermalSensor_get(
++    IN HANDLE hDevice,
++    OUT PHY_THERMAL_RESULT *pTsResult
++    );
++
++BOOLEAN
++Rtl8226b_ThermalSensor_resume_2P5G(
++    IN HANDLE hDevice
++    );
++
++BOOLEAN
++Rtl8226b_wol_set(
++    IN HANDLE hDevice,
++    IN PHY_WOL_EVENT *pwolevent
++    );
++
++BOOLEAN
++Rtl8226b_wol_exit(
++    IN HANDLE hDevice
++    );
++
++BOOLEAN
++Rtl8226b_phy_reset(
++    IN HANDLE hDevice
++    );
++
++BOOLEAN
++Rtl8226b_autoNegoEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_autoNegoEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_autoNegoAbility_get(
++    IN  HANDLE hDevice,
++    OUT PHY_LINK_ABILITY *pPhyAbility
++    );
++
++BOOLEAN
++Rtl8226b_autoNegoAbility_set(
++    IN HANDLE hDevice,
++    IN PHY_LINK_ABILITY *pPhyAbility
++    );
++
++BOOLEAN
++Rtl8226b_duplex_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_duplex_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_is_link(
++    IN  HANDLE hDevice,
++    OUT BOOL *plinkok
++    );
++
++BOOLEAN
++Rtl8226b_speed_get(
++    IN  HANDLE hDevice,
++    OUT UINT16 *pSpeed
++    );
++
++BOOLEAN
++Rtl8226b_force_speed_set(
++    IN HANDLE hDevice,
++    IN UINT16 Speed
++    );
++
++BOOLEAN
++Rtl8226b_force_speed_get(
++    IN  HANDLE hDevice,
++    OUT UINT16 *force_speed
++    );
++
++
++
++BOOLEAN
++Rtl8226b_enable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_greenEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_greenEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_eeeEnable_get(
++    IN  HANDLE hDevice,
++    OUT PHY_EEE_ENABLE *pEeeEnable
++    );
++
++BOOLEAN
++Rtl8226b_eeeEnable_set(
++    IN HANDLE hDevice,
++    IN PHY_EEE_ENABLE *pEeeEnable
++    );
++
++BOOLEAN
++Rtl8226b_PHYmodeEEE_set(
++	IN HANDLE hDevice,
++	int on_off
++	);
++
++BOOLEAN
++Rtl8226b_10M_PHYmodeEEEP_set(
++	IN HANDLE hDevice,
++	int on_off
++	);
++
++
++
++BOOLEAN
++Rtl8226b_crossOverMode_get(
++    IN  HANDLE hDevice,
++    OUT PHY_CROSSPVER_MODE *CrossOverMode
++    );
++
++BOOLEAN
++Rtl8226b_crossOverMode_set(
++    IN HANDLE hDevice,
++    IN PHY_CROSSPVER_MODE CrossOverMode
++    );
++
++BOOLEAN
++Rtl8226b_crossOverStatus_get(
++    IN  HANDLE hDevice,
++    OUT PHY_CROSSPVER_STATUS *pCrossOverStatus
++    );
++
++BOOLEAN
++Rtl8226b_masterSlave_get(
++    IN  HANDLE hDevice,
++    OUT PHY_MASTERSLAVE_MODE *MasterSlaveMode
++    );
++
++BOOLEAN
++Rtl8226b_masterSlave_set(
++    IN HANDLE hDevice,
++    IN PHY_MASTERSLAVE_MODE MasterSlaveMode
++    );
++
++BOOLEAN
++Rtl8226b_loopback_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_loopback_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_downSpeedEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_downSpeedEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_gigaLiteEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_gigaLiteEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_mdiSwapEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_mdiSwapEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_rtct_start(
++    IN HANDLE hDevice
++    );
++
++BOOLEAN
++Rtl8226b_rtctResult_get(
++    IN HANDLE hDevice,
++    OUT PHY_RTCT_RESULT *pRtctResult
++    );
++
++BOOLEAN
++Rtl8226b_rtctdone_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *prtct_done
++    );
++
++
++BOOLEAN
++Rtl8226b_linkDownPowerSavingEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_linkDownPowerSavingEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_2p5gLiteEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_2p5gLiteEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++BOOLEAN
++Rtl8226b_ThermalSensorEnable_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *pEnable
++    );
++
++BOOLEAN
++Rtl8226b_ThermalSensorEnable_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable,
++    IN UINT16 threshold
++    );
++
++BOOLEAN
++Rtl8226b_ieeeTestMode_set(
++    IN HANDLE hDevice,
++    IN UINT16 Speed,
++    IN PHY_IEEE_TEST_MODE *pIEEEtestmode
++    );
++
++BOOLEAN
++Rtl8226b_serdes_rst(
++    IN HANDLE hDevice
++    );
++
++BOOLEAN
++Rtl8226b_serdes_link_get(
++    IN  HANDLE hDevice,
++    OUT BOOL *perdesLink,
++    OUT PHY_SERDES_MODE *SerdesMode
++    );
++
++BOOLEAN
++Rtl8226b_serdes_option_set(
++    IN HANDLE hDevice,
++    IN UINT8 functioninput
++    );
++
++BOOLEAN
++Rtl8226b_serdes_option_get(
++    IN HANDLE hDevice,
++    OUT PHY_SERDES_OPTION *SerdesOption
++    );
++
++BOOLEAN
++Rtl8226b_serdes_polarity_swap(
++    IN HANDLE hDevice,
++    IN PHY_SERDES_POLARITY_SWAP *ppolarityswap
++    );
++
++BOOLEAN
++Rtl8226b_serdes_autoNego_set(
++    IN HANDLE hDevice,
++    IN BOOL Enable
++    );
++
++
++
++
++#endif /* __NIC_RTL8226_H__ */
++
+diff --git a/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b_init.c b/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b_init.c
+new file mode 100755
+index 000000000..a97c9e985
+--- /dev/null
++++ b/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b_init.c
+@@ -0,0 +1,1642 @@
++
++/* SW_SDK: include files */
++//#include <common/rt_type.h>
++//#include <common/debug/rt_log.h>
++//#include <osal/time.h>
++//#include <osal/phy_osal.h>
++//#include <hal/phy/nic_rtl8226/nic_rtl8226b.h>
++#include "rtl_adapter.h"
++#include "rtl8226_typedef.h"
++
++static const MMD_REG Rtl8226b_n0_ramcode[] =
++{
++	 { 31, 0xa436, 0XA016, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa436, 0XA012, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa436, 0XA014, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8010, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X801a, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8024, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X802f, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8051, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8057, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8063, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8068, },
++    { 31, 0xa438, 0Xd093, },
++    { 31, 0xa438, 0Xd1c4, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X135c, },
++    { 31, 0xa438, 0Xd704, },
++    { 31, 0xa438, 0X5fbc, },
++    { 31, 0xa438, 0Xd504, },
++    { 31, 0xa438, 0Xc9f1, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X0fc9, },
++    { 31, 0xa438, 0Xbb50, },
++    { 31, 0xa438, 0Xd505, },
++    { 31, 0xa438, 0Xa202, },
++    { 31, 0xa438, 0Xd504, },
++    { 31, 0xa438, 0X8c0f, },
++    { 31, 0xa438, 0Xd500, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X1519, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X1548, },
++    { 31, 0xa438, 0X2f70, },
++    { 31, 0xa438, 0X802a, },
++    { 31, 0xa438, 0X2f73, },
++    { 31, 0xa438, 0X156a, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X155c, },
++    { 31, 0xa438, 0Xd505, },
++    { 31, 0xa438, 0Xa202, },
++    { 31, 0xa438, 0Xd500, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X1551, },
++    { 31, 0xa438, 0Xc0c1, },
++    { 31, 0xa438, 0Xc0c0, },
++    { 31, 0xa438, 0Xd05a, },
++    { 31, 0xa438, 0Xd1ba, },
++    { 31, 0xa438, 0Xd701, },
++    { 31, 0xa438, 0X2529, },
++    { 31, 0xa438, 0X022a, },
++    { 31, 0xa438, 0Xd0a7, },
++    { 31, 0xa438, 0Xd1b9, },
++    { 31, 0xa438, 0Xa208, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X080e, },
++    { 31, 0xa438, 0Xd701, },
++    { 31, 0xa438, 0X408b, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X0a65, },
++    { 31, 0xa438, 0Xf003, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X0a6b, },
++    { 31, 0xa438, 0Xd701, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X0920, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X0915, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X0909, },
++    { 31, 0xa438, 0X228f, },
++    { 31, 0xa438, 0X8038, },
++    { 31, 0xa438, 0X9801, },
++    { 31, 0xa438, 0Xd71e, },
++    { 31, 0xa438, 0X5d61, },
++    { 31, 0xa438, 0Xd701, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X022a, },
++    { 31, 0xa438, 0X2005, },
++    { 31, 0xa438, 0X091a, },
++    { 31, 0xa438, 0X3bd9, },
++    { 31, 0xa438, 0X0919, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X0916, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X14c5, },
++    { 31, 0xa438, 0Xd703, },
++    { 31, 0xa438, 0X3181, },
++    { 31, 0xa438, 0X8061, },
++    { 31, 0xa438, 0X60ad, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X135c, },
++    { 31, 0xa438, 0Xd703, },
++    { 31, 0xa438, 0X5fba, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X0cc7, },
++    { 31, 0xa438, 0Xd096, },
++    { 31, 0xa438, 0Xd1a9, },
++    { 31, 0xa438, 0Xd503, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X0c94, },
++	{ 31, 0xa438, 0Xa802, },
++    { 31, 0xa438, 0Xa301, },
++    { 31, 0xa438, 0Xa801, },
++    { 31, 0xa438, 0Xc004, },
++    { 31, 0xa438, 0Xd710, },
++    { 31, 0xa438, 0X4000, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X1e79, },
++    { 31, 0xa436, 0XA026, },
++    { 31, 0xa438, 0X1e78, },
++    { 31, 0xa436, 0XA024, },
++    { 31, 0xa438, 0X0c93, },
++    { 31, 0xa436, 0XA022, },
++    { 31, 0xa438, 0X0cc5, },
++    { 31, 0xa436, 0XA020, },
++    { 31, 0xa438, 0X0915, },
++    { 31, 0xa436, 0XA006, },
++    { 31, 0xa438, 0X020a, },
++    { 31, 0xa436, 0XA004, },
++    { 31, 0xa438, 0X155b, },
++    { 31, 0xa436, 0XA002, },
++    { 31, 0xa438, 0X1542, },
++    { 31, 0xa436, 0XA000, },
++    { 31, 0xa438, 0X0fc7, },
++    { 31, 0xa436, 0XA008, },
++    { 31, 0xa438, 0Xff00, },
++    
++
++};
++
++
++static const MMD_REG Rtl8226b_n1_ramcode[] =
++{
++      { 31, 0xa436, 0XA016, },
++    { 31, 0xa438, 0X0010, },
++    { 31, 0xa436, 0XA012, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa436, 0XA014, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8010, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X801d, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X802c, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X802c, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X802c, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X802c, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X802c, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X802c, },
++    { 31, 0xa438, 0Xd700, },
++    { 31, 0xa438, 0X6090, },
++    { 31, 0xa438, 0X60d1, },
++    { 31, 0xa438, 0Xc95c, },
++    { 31, 0xa438, 0Xf007, },
++    { 31, 0xa438, 0X60b1, },
++    { 31, 0xa438, 0Xc95a, },
++    { 31, 0xa438, 0Xf004, },
++    { 31, 0xa438, 0Xc956, },
++    { 31, 0xa438, 0Xf002, },
++    { 31, 0xa438, 0Xc94e, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X00cd, },
++    { 31, 0xa438, 0Xd700, },
++    { 31, 0xa438, 0X6090, },
++    { 31, 0xa438, 0X60d1, },
++    { 31, 0xa438, 0Xc95c, },
++    { 31, 0xa438, 0Xf007, },
++    { 31, 0xa438, 0X60b1, },
++    { 31, 0xa438, 0Xc95a, },
++    { 31, 0xa438, 0Xf004, },
++    { 31, 0xa438, 0Xc956, },
++    { 31, 0xa438, 0Xf002, },
++    { 31, 0xa438, 0Xc94e, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X022a, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X0132, },
++    { 31, 0xa436, 0XA08E, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA08C, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA08A, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA088, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA086, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA084, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA082, },
++    { 31, 0xa438, 0X012f, },
++    { 31, 0xa436, 0XA080, },
++    { 31, 0xa438, 0X00cc, },
++    { 31, 0xa436, 0XA090, },
++    { 31, 0xa438, 0X0103, },
++};
++
++
++static const MMD_REG Rtl8226b_n2_ramcode[] =
++{
++    { 31, 0xa436, 0XA016, },
++    { 31, 0xa438, 0X0020, },
++    { 31, 0xa436, 0XA012, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa436, 0XA014, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8010, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8020, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X802a, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X8035, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X803c, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X803c, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X803c, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X803c, },
++    { 31, 0xa438, 0Xd107, },
++    { 31, 0xa438, 0Xd042, },
++    { 31, 0xa438, 0Xa404, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X09df, },
++    { 31, 0xa438, 0Xd700, },
++    { 31, 0xa438, 0X5fb4, },
++    { 31, 0xa438, 0X8280, },
++    { 31, 0xa438, 0Xd700, },
++    { 31, 0xa438, 0X6065, },
++    { 31, 0xa438, 0Xd125, },
++    { 31, 0xa438, 0Xf002, },
++    { 31, 0xa438, 0Xd12b, },
++    { 31, 0xa438, 0Xd040, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X077f, },
++    { 31, 0xa438, 0X0cf0, },
++    { 31, 0xa438, 0X0c50, },
++    { 31, 0xa438, 0Xd104, },
++    { 31, 0xa438, 0Xd040, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X0aa8, },
++    { 31, 0xa438, 0Xd700, },
++    { 31, 0xa438, 0X5fb4, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X0a2e, },
++    { 31, 0xa438, 0Xcb9b, },
++    { 31, 0xa438, 0Xd110, },
++    { 31, 0xa438, 0Xd040, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X0b7b, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X09df, },
++    { 31, 0xa438, 0Xd700, },
++    { 31, 0xa438, 0X5fb4, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X081b, },
++    { 31, 0xa438, 0X1000, },
++    { 31, 0xa438, 0X09df, },
++    { 31, 0xa438, 0Xd704, },
++    { 31, 0xa438, 0X7fb8, },
++    { 31, 0xa438, 0Xa718, },
++    { 31, 0xa438, 0X1800, },
++    { 31, 0xa438, 0X074e, },
++    { 31, 0xa436, 0XA10E, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA10C, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA10A, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA108, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0XA106, },
++    { 31, 0xa438, 0X074d, },
++    { 31, 0xa436, 0XA104, },
++    { 31, 0xa438, 0X0818, },
++    { 31, 0xa436, 0XA102, },
++    { 31, 0xa438, 0X0a2c, },
++    { 31, 0xa436, 0XA100, },
++    { 31, 0xa438, 0X077e, },
++    { 31, 0xa436, 0XA110, },
++    { 31, 0xa438, 0X000f, },
++
++};
++
++static const MMD_REG Rtl8226b_uc2_ramcode[] =
++{
++    { 31, 0xa436, 0Xb87c, },
++    { 31, 0xa438, 0X8625, },
++    { 31, 0xa436, 0Xb87e, },
++    { 31, 0xa438, 0Xaf86, },
++    { 31, 0xa438, 0X3daf, },
++    { 31, 0xa438, 0X8689, },
++    { 31, 0xa438, 0Xaf88, },
++    { 31, 0xa438, 0X69af, },
++    { 31, 0xa438, 0X8887, },
++    { 31, 0xa438, 0Xaf88, },
++    { 31, 0xa438, 0X9caf, },
++    { 31, 0xa438, 0X889c, },
++    { 31, 0xa438, 0Xaf88, },
++    { 31, 0xa438, 0X9caf, },
++    { 31, 0xa438, 0X889c, },
++    { 31, 0xa438, 0Xbf86, },
++    { 31, 0xa438, 0X49d7, },
++    { 31, 0xa438, 0X0040, },
++    { 31, 0xa438, 0X0277, },
++    { 31, 0xa438, 0X7daf, },
++    { 31, 0xa438, 0X2727, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7205, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7208, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X71f3, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X71f6, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7229, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X722c, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7217, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X721a, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X721d, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7211, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7220, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7214, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X722f, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7223, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7232, },
++    { 31, 0xa438, 0X0000, },
++    { 31, 0xa438, 0X7226, },
++    { 31, 0xa438, 0Xf8f9, },
++    { 31, 0xa438, 0Xfae0, },
++    { 31, 0xa438, 0X85b3, },
++    { 31, 0xa438, 0X3802, },
++    { 31, 0xa438, 0Xad27, },
++    { 31, 0xa438, 0X02ae, },
++    { 31, 0xa438, 0X03af, },
++    { 31, 0xa438, 0X8830, },
++    { 31, 0xa438, 0X1f66, },
++    { 31, 0xa438, 0Xef65, },
++    { 31, 0xa438, 0Xbfc2, },
++    { 31, 0xa438, 0X1f1a, },
++    { 31, 0xa438, 0X96f7, },
++    { 31, 0xa438, 0X05ee, },
++    { 31, 0xa438, 0Xffd2, },
++    { 31, 0xa438, 0X00da, },
++    { 31, 0xa438, 0Xf605, },
++    { 31, 0xa438, 0Xbfc2, },
++    { 31, 0xa438, 0X2f1a, },
++    { 31, 0xa438, 0X96f7, },
++    { 31, 0xa438, 0X05ee, },
++    { 31, 0xa438, 0Xffd2, },
++    { 31, 0xa438, 0X00db, },
++    { 31, 0xa438, 0Xf605, },
++    { 31, 0xa438, 0Xef02, },
++    { 31, 0xa438, 0X1f11, },
++    { 31, 0xa438, 0X0d42, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X4202, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xef02, },
++    { 31, 0xa438, 0X1b03, },
++    { 31, 0xa438, 0X1f11, },
++    { 31, 0xa438, 0X0d42, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X4502, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xef02, },
++    { 31, 0xa438, 0X1a03, },
++    { 31, 0xa438, 0X1f11, },
++    { 31, 0xa438, 0X0d42, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X4802, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xbfc2, },
++    { 31, 0xa438, 0X3f1a, },
++    { 31, 0xa438, 0X96f7, },
++    { 31, 0xa438, 0X05ee, },
++    { 31, 0xa438, 0Xffd2, },
++    { 31, 0xa438, 0X00da, },
++    { 31, 0xa438, 0Xf605, },
++    { 31, 0xa438, 0Xbfc2, },
++    { 31, 0xa438, 0X4f1a, },
++    { 31, 0xa438, 0X96f7, },
++    { 31, 0xa438, 0X05ee, },
++    { 31, 0xa438, 0Xffd2, },
++    { 31, 0xa438, 0X00db, },
++    { 31, 0xa438, 0Xf605, },
++    { 31, 0xa438, 0Xef02, },
++    { 31, 0xa438, 0X1f11, },
++    { 31, 0xa438, 0X0d42, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X4b02, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xef02, },
++    { 31, 0xa438, 0X1b03, },
++    { 31, 0xa438, 0X1f11, },
++    { 31, 0xa438, 0X0d42, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X4e02, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xef02, },
++    { 31, 0xa438, 0X1a03, },
++    { 31, 0xa438, 0X1f11, },
++    { 31, 0xa438, 0X0d42, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X5102, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xef56, },
++    { 31, 0xa438, 0Xd020, },
++    { 31, 0xa438, 0X1f11, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X5402, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X5702, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X5a02, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xe185, },
++    { 31, 0xa438, 0Xa0ef, },
++    { 31, 0xa438, 0X0348, },
++    { 31, 0xa438, 0X0a28, },
++    { 31, 0xa438, 0X05ef, },
++    { 31, 0xa438, 0X201b, },
++    { 31, 0xa438, 0X01ad, },
++    { 31, 0xa438, 0X2735, },
++    { 31, 0xa438, 0X1f44, },
++    { 31, 0xa438, 0Xe085, },
++    { 31, 0xa438, 0X88e1, },
++    { 31, 0xa438, 0X8589, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X5d02, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xe085, },
++    { 31, 0xa438, 0X8ee1, },
++    { 31, 0xa438, 0X858f, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X6002, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xe085, },
++    { 31, 0xa438, 0X94e1, },
++    { 31, 0xa438, 0X8595, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X6302, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xe085, },
++    { 31, 0xa438, 0X9ae1, },
++    { 31, 0xa438, 0X859b, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X6602, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xaf88, },
++    { 31, 0xa438, 0X3cbf, },
++    { 31, 0xa438, 0X883f, },
++    { 31, 0xa438, 0X026e, },
++    { 31, 0xa438, 0X9cad, },
++    { 31, 0xa438, 0X2835, },
++    { 31, 0xa438, 0X1f44, },
++    { 31, 0xa438, 0Xe08f, },
++    { 31, 0xa438, 0Xf8e1, },
++    { 31, 0xa438, 0X8ff9, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X5d02, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xe08f, },
++    { 31, 0xa438, 0Xfae1, },
++    { 31, 0xa438, 0X8ffb, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X6002, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xe08f, },
++    { 31, 0xa438, 0Xfce1, },
++    { 31, 0xa438, 0X8ffd, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X6302, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xe08f, },
++    { 31, 0xa438, 0Xfee1, },
++    { 31, 0xa438, 0X8fff, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X6602, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xaf88, },
++    { 31, 0xa438, 0X3ce1, },
++    { 31, 0xa438, 0X85a1, },
++    { 31, 0xa438, 0X1b21, },
++    { 31, 0xa438, 0Xad37, },
++    { 31, 0xa438, 0X341f, },
++    { 31, 0xa438, 0X44e0, },
++    { 31, 0xa438, 0X858a, },
++    { 31, 0xa438, 0Xe185, },
++    { 31, 0xa438, 0X8bbf, },
++    { 31, 0xa438, 0X885d, },
++    { 31, 0xa438, 0X026e, },
++    { 31, 0xa438, 0X7de0, },
++    { 31, 0xa438, 0X8590, },
++    { 31, 0xa438, 0Xe185, },
++    { 31, 0xa438, 0X91bf, },
++    { 31, 0xa438, 0X8860, },
++    { 31, 0xa438, 0X026e, },
++    { 31, 0xa438, 0X7de0, },
++    { 31, 0xa438, 0X8596, },
++    { 31, 0xa438, 0Xe185, },
++    { 31, 0xa438, 0X97bf, },
++    { 31, 0xa438, 0X8863, },
++    { 31, 0xa438, 0X026e, },
++    { 31, 0xa438, 0X7de0, },
++    { 31, 0xa438, 0X859c, },
++    { 31, 0xa438, 0Xe185, },
++    { 31, 0xa438, 0X9dbf, },
++    { 31, 0xa438, 0X8866, },
++    { 31, 0xa438, 0X026e, },
++    { 31, 0xa438, 0X7dae, },
++    { 31, 0xa438, 0X401f, },
++    { 31, 0xa438, 0X44e0, },
++    { 31, 0xa438, 0X858c, },
++    { 31, 0xa438, 0Xe185, },
++    { 31, 0xa438, 0X8dbf, },
++    { 31, 0xa438, 0X885d, },
++    { 31, 0xa438, 0X026e, },
++    { 31, 0xa438, 0X7de0, },
++    { 31, 0xa438, 0X8592, },
++    { 31, 0xa438, 0Xe185, },
++    { 31, 0xa438, 0X93bf, },
++    { 31, 0xa438, 0X8860, },
++    { 31, 0xa438, 0X026e, },
++    { 31, 0xa438, 0X7de0, },
++    { 31, 0xa438, 0X8598, },
++    { 31, 0xa438, 0Xe185, },
++    { 31, 0xa438, 0X99bf, },
++    { 31, 0xa438, 0X8863, },
++    { 31, 0xa438, 0X026e, },
++    { 31, 0xa438, 0X7de0, },
++    { 31, 0xa438, 0X859e, },
++    { 31, 0xa438, 0Xe185, },
++    { 31, 0xa438, 0X9fbf, },
++    { 31, 0xa438, 0X8866, },
++    { 31, 0xa438, 0X026e, },
++    { 31, 0xa438, 0X7dae, },
++    { 31, 0xa438, 0X0ce1, },
++    { 31, 0xa438, 0X85b3, },
++    { 31, 0xa438, 0X3904, },
++    { 31, 0xa438, 0Xac2f, },
++    { 31, 0xa438, 0X04ee, },
++    { 31, 0xa438, 0X85b3, },
++    { 31, 0xa438, 0X00af, },
++    { 31, 0xa438, 0X39d9, },
++    { 31, 0xa438, 0X22ac, },
++    { 31, 0xa438, 0Xeaf0, },
++    { 31, 0xa438, 0Xacf6, },
++    { 31, 0xa438, 0Xf0ac, },
++    { 31, 0xa438, 0Xfaf0, },
++    { 31, 0xa438, 0Xacf8, },
++    { 31, 0xa438, 0Xf0ac, },
++    { 31, 0xa438, 0Xfcf0, },
++    { 31, 0xa438, 0Xad00, },
++    { 31, 0xa438, 0Xf0ac, },
++    { 31, 0xa438, 0Xfef0, },
++    { 31, 0xa438, 0Xacf0, },
++    { 31, 0xa438, 0Xf0ac, },
++    { 31, 0xa438, 0Xf4f0, },
++    { 31, 0xa438, 0Xacf2, },
++    { 31, 0xa438, 0Xf0ac, },
++    { 31, 0xa438, 0Xb0f0, },
++    { 31, 0xa438, 0Xacae, },
++    { 31, 0xa438, 0Xf0ac, },
++    { 31, 0xa438, 0Xacf0, },
++    { 31, 0xa438, 0Xacaa, },
++    { 31, 0xa438, 0Xa100, },
++    { 31, 0xa438, 0X0ce1, },
++    { 31, 0xa438, 0X8ff7, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X8402, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xaf26, },
++    { 31, 0xa438, 0Xe9e1, },
++    { 31, 0xa438, 0X8ff6, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X8402, },
++    { 31, 0xa438, 0X6e7d, },
++    { 31, 0xa438, 0Xaf26, },
++    { 31, 0xa438, 0Xf520, },
++    { 31, 0xa438, 0Xac86, },
++    { 31, 0xa438, 0Xbf88, },
++    { 31, 0xa438, 0X3f02, },
++    { 31, 0xa438, 0X6e9c, },
++    { 31, 0xa438, 0Xad28, },
++    { 31, 0xa438, 0X03af, },
++    { 31, 0xa438, 0X3324, },
++    { 31, 0xa438, 0Xad38, },
++    { 31, 0xa438, 0X03af, },
++    { 31, 0xa438, 0X32e6, },
++    { 31, 0xa438, 0Xaf32, },
++    { 31, 0xa438, 0Xfb00, },
++    { 31, 0xa436, 0Xb87c, },
++    { 31, 0xa438, 0X8ff6, },
++    { 31, 0xa436, 0Xb87e, },
++    { 31, 0xa438, 0X0705, },
++    { 31, 0xa436, 0Xb87c, },
++    { 31, 0xa438, 0X8ff8, },
++    { 31, 0xa436, 0Xb87e, },
++    { 31, 0xa438, 0X19cc, },
++    { 31, 0xa436, 0Xb87c, },
++    { 31, 0xa438, 0X8ffa, },
++    { 31, 0xa436, 0Xb87e, },
++    { 31, 0xa438, 0X28e3, },
++    { 31, 0xa436, 0Xb87c, },
++    { 31, 0xa438, 0X8ffc, },
++    { 31, 0xa436, 0Xb87e, },
++    { 31, 0xa438, 0X1047, },
++    { 31, 0xa436, 0Xb87c, },
++    { 31, 0xa438, 0X8ffe, },
++    { 31, 0xa436, 0Xb87e, },
++    { 31, 0xa438, 0X0a45, },
++    { 31, 0xa436, 0Xb85e, },
++    { 31, 0xa438, 0X271E, },
++    { 31, 0xa436, 0Xb860, },
++    { 31, 0xa438, 0X3846, },
++    { 31, 0xa436, 0Xb862, },
++    { 31, 0xa438, 0X26E6, },
++    { 31, 0xa436, 0Xb864, },
++    { 31, 0xa438, 0X32E3, },
++    { 31, 0xa436, 0Xb886, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb888, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb88a, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb88c, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb838, },
++    { 31, 0xa438, 0X000f, },
++
++};
++
++static const MMD_REG Rtl8226b_uc_ramcode[] =
++{
++	 { 31, 0xa436, 0X846e, },
++    { 31, 0xa438, 0Xaf84, },
++    { 31, 0xa438, 0X86af, },
++    { 31, 0xa438, 0X8690, },
++    { 31, 0xa438, 0Xaf86, },
++    { 31, 0xa438, 0Xa4af, },
++    { 31, 0xa438, 0X86a4, },
++    { 31, 0xa438, 0Xaf86, },
++    { 31, 0xa438, 0Xa4af, },
++    { 31, 0xa438, 0X86a4, },
++    { 31, 0xa438, 0Xaf86, },
++    { 31, 0xa438, 0Xa4af, },
++    { 31, 0xa438, 0X86a4, },
++    { 31, 0xa438, 0Xee82, },
++    { 31, 0xa438, 0X5f00, },
++    { 31, 0xa438, 0X0284, },
++    { 31, 0xa438, 0X90af, },
++    { 31, 0xa438, 0X0441, },
++    { 31, 0xa438, 0Xf8e0, },
++    { 31, 0xa438, 0X8ff3, },
++    { 31, 0xa438, 0Xa000, },
++    { 31, 0xa438, 0X0502, },
++    { 31, 0xa438, 0X84a4, },
++    { 31, 0xa438, 0Xae06, },
++    { 31, 0xa438, 0Xa001, },
++    { 31, 0xa438, 0X0302, },
++    { 31, 0xa438, 0X84c8, },
++    { 31, 0xa438, 0Xfc04, },
++    { 31, 0xa438, 0Xf8f9, },
++    { 31, 0xa438, 0Xef59, },
++    { 31, 0xa438, 0Xe080, },
++    { 31, 0xa438, 0X15ad, },
++    { 31, 0xa438, 0X2702, },
++    { 31, 0xa438, 0Xae03, },
++    { 31, 0xa438, 0Xaf84, },
++    { 31, 0xa438, 0Xc3bf, },
++    { 31, 0xa438, 0X53ca, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8ad, },
++    { 31, 0xa438, 0X2807, },
++    { 31, 0xa438, 0X0285, },
++    { 31, 0xa438, 0X2cee, },
++    { 31, 0xa438, 0X8ff3, },
++    { 31, 0xa438, 0X01ef, },
++    { 31, 0xa438, 0X95fd, },
++    { 31, 0xa438, 0Xfc04, },
++    { 31, 0xa438, 0Xf8f9, },
++    { 31, 0xa438, 0Xfaef, },
++    { 31, 0xa438, 0X69bf, },
++    { 31, 0xa438, 0X53ca, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8ac, },
++    { 31, 0xa438, 0X2822, },
++    { 31, 0xa438, 0Xd480, },
++    { 31, 0xa438, 0X00bf, },
++    { 31, 0xa438, 0X8684, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9bf, },
++    { 31, 0xa438, 0X8687, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9bf, },
++    { 31, 0xa438, 0X868a, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9bf, },
++    { 31, 0xa438, 0X868d, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9ee, },
++    { 31, 0xa438, 0X8ff3, },
++    { 31, 0xa438, 0X00af, },
++    { 31, 0xa438, 0X8526, },
++    { 31, 0xa438, 0Xe08f, },
++    { 31, 0xa438, 0Xf4e1, },
++    { 31, 0xa438, 0X8ff5, },
++    { 31, 0xa438, 0Xe28f, },
++    { 31, 0xa438, 0Xf6e3, },
++    { 31, 0xa438, 0X8ff7, },
++    { 31, 0xa438, 0X1b45, },
++    { 31, 0xa438, 0Xac27, },
++    { 31, 0xa438, 0X0eee, },
++    { 31, 0xa438, 0X8ff4, },
++    { 31, 0xa438, 0X00ee, },
++    { 31, 0xa438, 0X8ff5, },
++    { 31, 0xa438, 0X0002, },
++    { 31, 0xa438, 0X852c, },
++    { 31, 0xa438, 0Xaf85, },
++    { 31, 0xa438, 0X26e0, },
++    { 31, 0xa438, 0X8ff4, },
++    { 31, 0xa438, 0Xe18f, },
++    { 31, 0xa438, 0Xf52c, },
++    { 31, 0xa438, 0X0001, },
++    { 31, 0xa438, 0Xe48f, },
++    { 31, 0xa438, 0Xf4e5, },
++    { 31, 0xa438, 0X8ff5, },
++    { 31, 0xa438, 0Xef96, },
++    { 31, 0xa438, 0Xfefd, },
++    { 31, 0xa438, 0Xfc04, },
++    { 31, 0xa438, 0Xf8f9, },
++    { 31, 0xa438, 0Xef59, },
++    { 31, 0xa438, 0Xbf53, },
++    { 31, 0xa438, 0X2202, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xa18b, },
++    { 31, 0xa438, 0X02ae, },
++    { 31, 0xa438, 0X03af, },
++    { 31, 0xa438, 0X85da, },
++    { 31, 0xa438, 0Xbf57, },
++    { 31, 0xa438, 0X7202, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xe48f, },
++    { 31, 0xa438, 0Xf8e5, },
++    { 31, 0xa438, 0X8ff9, },
++    { 31, 0xa438, 0Xbf57, },
++    { 31, 0xa438, 0X7502, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xe48f, },
++    { 31, 0xa438, 0Xfae5, },
++    { 31, 0xa438, 0X8ffb, },
++    { 31, 0xa438, 0Xbf57, },
++    { 31, 0xa438, 0X7802, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xe48f, },
++    { 31, 0xa438, 0Xfce5, },
++    { 31, 0xa438, 0X8ffd, },
++    { 31, 0xa438, 0Xbf57, },
++    { 31, 0xa438, 0X7b02, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xe48f, },
++    { 31, 0xa438, 0Xfee5, },
++    { 31, 0xa438, 0X8fff, },
++    { 31, 0xa438, 0Xbf57, },
++    { 31, 0xa438, 0X6c02, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xa102, },
++    { 31, 0xa438, 0X13ee, },
++    { 31, 0xa438, 0X8ffc, },
++    { 31, 0xa438, 0X80ee, },
++    { 31, 0xa438, 0X8ffd, },
++    { 31, 0xa438, 0X00ee, },
++    { 31, 0xa438, 0X8ffe, },
++    { 31, 0xa438, 0X80ee, },
++    { 31, 0xa438, 0X8fff, },
++    { 31, 0xa438, 0X00af, },
++    { 31, 0xa438, 0X8599, },
++    { 31, 0xa438, 0Xa101, },
++    { 31, 0xa438, 0X0cbf, },
++    { 31, 0xa438, 0X534c, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8a1, },
++    { 31, 0xa438, 0X0303, },
++    { 31, 0xa438, 0Xaf85, },
++    { 31, 0xa438, 0X77bf, },
++    { 31, 0xa438, 0X5322, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8a1, },
++    { 31, 0xa438, 0X8b02, },
++    { 31, 0xa438, 0Xae03, },
++    { 31, 0xa438, 0Xaf86, },
++    { 31, 0xa438, 0X64e0, },
++    { 31, 0xa438, 0X8ff8, },
++    { 31, 0xa438, 0Xe18f, },
++    { 31, 0xa438, 0Xf9bf, },
++    { 31, 0xa438, 0X8684, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9e0, },
++    { 31, 0xa438, 0X8ffa, },
++    { 31, 0xa438, 0Xe18f, },
++    { 31, 0xa438, 0Xfbbf, },
++    { 31, 0xa438, 0X8687, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9e0, },
++    { 31, 0xa438, 0X8ffc, },
++    { 31, 0xa438, 0Xe18f, },
++    { 31, 0xa438, 0Xfdbf, },
++    { 31, 0xa438, 0X868a, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9e0, },
++    { 31, 0xa438, 0X8ffe, },
++    { 31, 0xa438, 0Xe18f, },
++    { 31, 0xa438, 0Xffbf, },
++    { 31, 0xa438, 0X868d, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9af, },
++    { 31, 0xa438, 0X867f, },
++    { 31, 0xa438, 0Xbf53, },
++    { 31, 0xa438, 0X2202, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xa144, },
++    { 31, 0xa438, 0X3cbf, },
++    { 31, 0xa438, 0X547b, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8e4, },
++    { 31, 0xa438, 0X8ff8, },
++    { 31, 0xa438, 0Xe58f, },
++    { 31, 0xa438, 0Xf9bf, },
++    { 31, 0xa438, 0X547e, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8e4, },
++    { 31, 0xa438, 0X8ffa, },
++    { 31, 0xa438, 0Xe58f, },
++    { 31, 0xa438, 0Xfbbf, },
++    { 31, 0xa438, 0X5481, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8e4, },
++    { 31, 0xa438, 0X8ffc, },
++    { 31, 0xa438, 0Xe58f, },
++    { 31, 0xa438, 0Xfdbf, },
++    { 31, 0xa438, 0X5484, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8e4, },
++    { 31, 0xa438, 0X8ffe, },
++    { 31, 0xa438, 0Xe58f, },
++    { 31, 0xa438, 0Xffbf, },
++    { 31, 0xa438, 0X5322, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8a1, },
++    { 31, 0xa438, 0X4448, },
++    { 31, 0xa438, 0Xaf85, },
++    { 31, 0xa438, 0Xa7bf, },
++    { 31, 0xa438, 0X5322, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xc8a1, },
++    { 31, 0xa438, 0X313c, },
++    { 31, 0xa438, 0Xbf54, },
++    { 31, 0xa438, 0X7b02, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xe48f, },
++    { 31, 0xa438, 0Xf8e5, },
++    { 31, 0xa438, 0X8ff9, },
++    { 31, 0xa438, 0Xbf54, },
++    { 31, 0xa438, 0X7e02, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xe48f, },
++    { 31, 0xa438, 0Xfae5, },
++    { 31, 0xa438, 0X8ffb, },
++    { 31, 0xa438, 0Xbf54, },
++    { 31, 0xa438, 0X8102, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xe48f, },
++    { 31, 0xa438, 0Xfce5, },
++    { 31, 0xa438, 0X8ffd, },
++    { 31, 0xa438, 0Xbf54, },
++    { 31, 0xa438, 0X8402, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xe48f, },
++    { 31, 0xa438, 0Xfee5, },
++    { 31, 0xa438, 0X8fff, },
++    { 31, 0xa438, 0Xbf53, },
++    { 31, 0xa438, 0X2202, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xa131, },
++    { 31, 0xa438, 0X03af, },
++    { 31, 0xa438, 0X85a7, },
++    { 31, 0xa438, 0Xd480, },
++    { 31, 0xa438, 0X00bf, },
++    { 31, 0xa438, 0X8684, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9bf, },
++    { 31, 0xa438, 0X8687, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9bf, },
++    { 31, 0xa438, 0X868a, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9bf, },
++    { 31, 0xa438, 0X868d, },
++    { 31, 0xa438, 0X0252, },
++    { 31, 0xa438, 0Xa9ef, },
++    { 31, 0xa438, 0X95fd, },
++    { 31, 0xa438, 0Xfc04, },
++    { 31, 0xa438, 0Xf0d1, },
++    { 31, 0xa438, 0X2af0, },
++    { 31, 0xa438, 0Xd12c, },
++    { 31, 0xa438, 0Xf0d1, },
++    { 31, 0xa438, 0X44f0, },
++    { 31, 0xa438, 0Xd146, },
++    { 31, 0xa438, 0Xbf86, },
++    { 31, 0xa438, 0Xa102, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xbf86, },
++    { 31, 0xa438, 0Xa102, },
++    { 31, 0xa438, 0X52c8, },
++    { 31, 0xa438, 0Xd101, },
++    { 31, 0xa438, 0Xaf06, },
++    { 31, 0xa438, 0Xa570, },
++    { 31, 0xa438, 0Xce42, },
++    { 31, 0xa436, 0Xb818, },
++    { 31, 0xa438, 0X043d, },
++    { 31, 0xa436, 0Xb81a, },
++    { 31, 0xa438, 0X06a3, },
++    { 31, 0xa436, 0Xb81c, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb81e, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb850, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb852, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb878, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb884, },
++    { 31, 0xa438, 0Xffff, },
++    { 31, 0xa436, 0Xb832, },
++    { 31, 0xa438, 0X0003, },
++    
++};
++
++static const MMD_REG Rtl8226b_data_ramcode[] =
++{
++   
++};
++
++static const MMD_REG Rtl8226b_isram_patch[] =
++{
++   
++};
++
++static BOOL
++Rtl8226b_wait_for_bit(
++    IN HANDLE hDevice,
++    IN UINT16 dev,
++    IN UINT16 addr,
++    IN UINT16 mask,
++    IN BOOL   set,
++    IN UINT16 timeoutms)
++{
++    BOOL status = FAILURE;
++    UINT16 phydata = 0;
++
++    while (--timeoutms) {
++        status = MmdPhyRead(hDevice, MMD_VEND2, addr, &phydata);
++        if (!status)
++            goto exit;
++
++        if (!set)
++            phydata = ~phydata;
++
++        if ((phydata & mask) == mask)
++            return 1;
++
++        Sleep(1);
++    }
++
++    osal_printf("Timeout (dev=%02x addr=0x%02x mask=0x%02x timeout=%d)\n",
++          dev, addr, mask, timeoutms);
++
++exit:
++    return 0;
++}
++
++BOOLEAN
++Rtl8226b_phy_init(
++    IN HANDLE hDevice,
++    IN PHY_LINK_ABILITY *pphylinkability,
++    IN BOOL singlephy
++    )
++{
++    BOOL status = FAILURE;
++    UINT16 i = 0;   /* SW_SDK: use UINT16 instead of UINT8, for MMD_REG array may over 255 entries */
++    UINT16 phydata = 0;
++    const UINT16 patchver = 0x0019, patchaddr = 0x8024;
++
++    // Polling PHY Status
++    status = Rtl8226b_wait_for_bit(hDevice, MMD_VEND2, 0xA420, 0x3, 1, 100);
++    if (status != SUCCESS)
++        goto exit;
++
++    // MMD 31.0xA436[15:0] = 0x801E
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0x801E);
++    if (status != SUCCESS)
++        goto exit;
++
++    status = MmdPhyRead(hDevice, MMD_VEND2, 0xA438, &phydata);
++    if (status != SUCCESS)
++        goto exit;
++
++    // Already patched.
++    if (phydata == patchver)
++    {
++        status = 1;
++        goto exit;
++    }
++    else
++    {
++        // Patch request & wait patch_rdy (for normal patch flow - Driver Initialize)
++        // MMD 31.0xB820[4] = 1'b1     //(patch request)
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xB820, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= BIT_4;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xB820, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        //wait for patch ready = 1 (MMD 31.0xB800[6])
++        status = Rtl8226b_wait_for_bit(hDevice, MMD_VEND2, 0xB800, BIT_6, 1, 100);
++        if (status != SUCCESS)
++            goto exit;
++
++        //Set patch_key & patch_lock
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, patchaddr);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA438[15:0] = 0x3701
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA438, 0x3701);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA436[15:0] = 0xB82E
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, 0xB82E);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA438[15:0] = 0x0001
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA438, 0x0001);
++        if (status != SUCCESS)
++            goto exit;
++
++        // NC & UC patch
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xB820, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= BIT_7;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xB820, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // patch nc0
++        for(i=0; i<sizeof(Rtl8226b_n0_ramcode)/sizeof(MMD_REG); i++)
++        {
++            status = MmdPhyWrite(hDevice, Rtl8226b_n0_ramcode[i].dev, Rtl8226b_n0_ramcode[i].addr, Rtl8226b_n0_ramcode[i].value);
++            if (status != SUCCESS)
++                goto exit;
++        }
++        phy_osal_printf("\n");
++        phy_osal_printf("load nc0 ramcode complete!\n");
++
++        // patch nc1
++        for(i=0; i<sizeof(Rtl8226b_n1_ramcode)/sizeof(MMD_REG); i++)
++        {
++            status = MmdPhyWrite(hDevice, Rtl8226b_n1_ramcode[i].dev, Rtl8226b_n1_ramcode[i].addr, Rtl8226b_n1_ramcode[i].value);
++            if (status != SUCCESS)
++                goto exit;
++        }
++        phy_osal_printf("\n");
++        phy_osal_printf("load nc1 ramcode complete!\n");
++
++
++        // patch nc2
++        for(i=0; i<sizeof(Rtl8226b_n2_ramcode)/sizeof(MMD_REG); i++)
++        {
++            status = MmdPhyWrite(hDevice, Rtl8226b_n2_ramcode[i].dev, Rtl8226b_n2_ramcode[i].addr, Rtl8226b_n2_ramcode[i].value);
++            if (status != SUCCESS)
++                goto exit;
++        }
++        phy_osal_printf("\n");
++        phy_osal_printf("load nc2 ramcode complete!\n");
++
++        // patch uc2
++        for(i=0; i<sizeof(Rtl8226b_uc2_ramcode)/sizeof(MMD_REG); i++)
++        {
++            status = MmdPhyWrite(hDevice, Rtl8226b_uc2_ramcode[i].dev, Rtl8226b_uc2_ramcode[i].addr, Rtl8226b_uc2_ramcode[i].value);
++            
++			if (status != SUCCESS)
++                goto exit;
++        }
++        phy_osal_printf("\n");
++        phy_osal_printf("load uc2 ramcode complete!\n");
++
++        // MMD 31.0xB820[7] = 1'b0
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xB820, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~BIT_7);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xB820, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // patch uc
++        for(i=0; i<sizeof(Rtl8226b_uc_ramcode)/sizeof(MMD_REG); i++)
++        {
++            status = MmdPhyWrite(hDevice, Rtl8226b_uc_ramcode[i].dev, Rtl8226b_uc_ramcode[i].addr, Rtl8226b_uc_ramcode[i].value);
++            if (status != SUCCESS)
++                goto exit;
++        }
++        phy_osal_printf("\n");
++        phy_osal_printf("load uc ramcode complete!\n");
++
++        // GPHY OCP 0xB896 bit[0] = 0x0
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xB896, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~BIT_0);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xB896, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // GPHY OCP 0xB892 bit[15:8] = 0x0
++        phydata = 0;
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xB892, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // patch ram code
++        for(i=0; i<sizeof(Rtl8226b_data_ramcode)/sizeof(MMD_REG); i++)
++        {
++            status = MmdPhyWrite(hDevice, Rtl8226b_data_ramcode[i].dev, Rtl8226b_data_ramcode[i].addr, Rtl8226b_data_ramcode[i].value);
++            if (status != SUCCESS)
++                goto exit;
++        }
++        phy_osal_printf("\n");
++        phy_osal_printf("load data ramcode complete!\n");
++
++        // GPHY OCP 0xB896 bit[0] = 0x1
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xB896, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata |= BIT_0;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xB896, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // Clear patch_key & patch_lock
++        phydata = 0x0;
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA438[15:0] = 0x0000
++        phydata = 0x0;
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA438, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xB82E[0] = 1'b0
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xB82E, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~BIT_0);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xB82E, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA436[15:0] = patch_key_addr
++        phydata = patchaddr;
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA438[15:0] = 0x0000
++        phydata = 0x0;
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA438, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // Release patch request
++        status = MmdPhyRead(hDevice, MMD_VEND2, 0xB820, &phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        phydata &= (~BIT_4);
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xB820, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = Rtl8226b_wait_for_bit(hDevice, MMD_VEND2, 0xB800, BIT_6, 0, 100);
++        if (status != SUCCESS)
++            goto exit;
++
++      
++
++
++		
++        // Lock Main
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa46A, 0x0302);
++        if (status != SUCCESS)
++            goto exit;
++
++
++	
++// GPHY REG
++  // Patch XG INRX parameters
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xac46, 0xB794);
++        if (status != SUCCESS)
++            goto exit;	
++		
++		
++			
++		
++		
++		
++        // Patch Fnet/ Giga CHNEST
++
++        // normal patch
++    status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa412, 0x0200);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa5d4, 0x0081);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xad30, 0x0A57);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xad30, 0x0A55);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xb87c, 0x80F5);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xb87e, 0x760E);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xb87c, 0x8107);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xb87e, 0x360E);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xb87c, 0x8551);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xb87e, 0x80E);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xbf00, 0xB202);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xbf46, 0x0300);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8044);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x804A);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8050);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8056);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x805C);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8062);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8068);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x806E);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8074);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x807A);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x240F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8045);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x804B);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8051);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8057);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x805D);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8063);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8069);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x806F);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8075);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x807B);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x1700);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA4CA, 0x6A50);
++        if (status != SUCCESS)
++            goto exit;
++		
++		status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8FF4);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x0000);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8FF6);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x03E8);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8FF8);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x8000);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8FFA);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x8000);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8FFC);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x8000);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8FFE);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0x8000);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8015);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0xF9BF);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xd12A, 0x8000);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xd12C, 0x8000);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xd144, 0x8000);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xd146, 0x8000);
++        if (status != SUCCESS)
++            goto exit;
++		
++		
++		status = MmdPhyWrite(hDevice, MMD_VEND2, 0xbf84, 0xAC00);
++        if (status != SUCCESS)
++            goto exit;
++		
++		status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa436, 0x8170);
++        if (status != SUCCESS)
++            goto exit;
++
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa438, 0xd8a0);
++        if (status != SUCCESS)
++            goto exit;
++
++		
++		
++        // Release Lock Main
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xa46A, 0x0300);
++        if (status != SUCCESS)
++            goto exit;
++		
++	
++//--------------- SDS patch --------------n
++    
++       status = MmdPhyWrite(hDevice, MMD_VEND1, 0x75B5, 0xE086);
++        if (status != SUCCESS)
++            goto exit;
++		
++		
++		
++//ISRAM PATCH
++        if (singlephy)
++        {
++            phy_osal_printf("load isram patch ramcode:\n");
++            for(i=0; i<sizeof(Rtl8226b_isram_patch)/sizeof(MMD_REG); i++)
++            {
++                status = MmdPhyWrite(hDevice, Rtl8226b_isram_patch[i].dev, Rtl8226b_isram_patch[i].addr, Rtl8226b_isram_patch[i].value);
++                if (status != SUCCESS)
++                    goto exit;
++            }
++            phy_osal_printf("\n");
++            phy_osal_printf("load isram patch complete!\n");
++        }
++
++
++      status = MmdPhyWrite(hDevice, MMD_VEND1, 0x75B6, 0x0024);
++        if (status != SUCCESS)
++            goto exit;
++
++
++
++
++  // Update patch version
++        phydata = 0x801E;
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA436, phydata);
++        if (status != SUCCESS)
++            goto exit;
++
++        // MMD 31.0xA438[15:0] =  driver_note_ver
++        phydata = patchver;
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA438, phydata);
++        if (status != SUCCESS)
++            goto exit;
++		
++
++
++
++        // PHYRST & Restart Nway
++        status = MmdPhyWrite(hDevice, MMD_VEND2, 0xA400, 0x9200);
++        if (status != SUCCESS)
++            goto exit;
++    }
++
++exit:
++    return status;
++}
++
+diff --git a/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b_init.h b/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b_init.h
+new file mode 100755
+index 000000000..882b9401a
+--- /dev/null
++++ b/drivers/net/ethernet/mediatek/rtl822x/nic_rtl8226b_init.h
+@@ -0,0 +1,16 @@
++
++#ifndef __NIC_RTL8226B_INIT_H__
++#define __NIC_RTL8226B_INIT_H__
++
++BOOLEAN
++Rtl8226b_phy_init(
++    IN HANDLE hDevice,
++    IN PHY_LINK_ABILITY *pphylinkability,
++    IN BOOL singlephy
++    );
++
++#endif
++
++
++
++
+diff --git a/drivers/net/ethernet/mediatek/rtl822x/rtl8226_typedef.h b/drivers/net/ethernet/mediatek/rtl822x/rtl8226_typedef.h
+new file mode 100755
+index 000000000..3984949dc
+--- /dev/null
++++ b/drivers/net/ethernet/mediatek/rtl822x/rtl8226_typedef.h
+@@ -0,0 +1,302 @@
++/*
++ * Copyright (C) 2019 Realtek Semiconductor Corp.
++ * All Rights Reserved.
++ *
++ * This program is the proprietary software of Realtek Semiconductor
++ * Corporation and/or its licensors, and only be used, duplicated,
++ * modified or distributed under the authorized license from Realtek.
++ *
++ * ANY USE OF THE SOFTWARE OTHER THAN AS AUTHORIZED UNDER
++ * THIS LICENSE OR COPYRIGHT LAW IS PROHIBITED.
++ *
++ * Purpose : PHY 8226 Driver
++ *
++ * Feature : PHY 8226 Driver
++ *
++ */
++#ifndef __NIC_RTL8226_TYPEDEF_H__
++#define __NIC_RTL8226_TYPEDEF_H__
++
++#include <linux/phy.h>
++
++/* from typedef.h and rtl8156_mmd.h */
++
++#define BIT_0       0x0001
++#define BIT_1       0x0002
++#define BIT_2       0x0004
++#define BIT_3       0x0008
++#define BIT_4       0x0010
++#define BIT_5       0x0020
++#define BIT_6       0x0040
++#define BIT_7       0x0080
++#define BIT_8       0x0100
++#define BIT_9       0x0200
++#define BIT_10      0x0400
++#define BIT_11      0x0800
++#define BIT_12      0x1000
++#define BIT_13      0x2000
++#define BIT_14      0x4000
++#define BIT_15      0x8000
++
++#define SUCCESS     TRUE
++#define FAILURE     FALSE
++
++
++
++typedef struct {
++    struct mtk_eth *eth;
++    int addr;
++} HANDLE;
++
++#define BOOLEAN         bool
++#define BOOL            uint32
++#define UINT32          uint32
++#define UINT16          uint16
++#define UINT8           uint8
++#define Sleep(_t)       osal_time_udelay(_t*1000)
++#define IN
++#define OUT
++
++
++#define MMD_PMAPMD     1
++#define MMD_PCS        3
++#define MMD_AN         7
++#define MMD_VEND1      30   /* Vendor specific 2 */
++#define MMD_VEND2      31   /* Vendor specific 2 */
++
++
++typedef struct
++{
++    UINT16 dev;
++    UINT16 addr;
++    UINT16 value;
++} MMD_REG;
++
++
++#define NO_LINK 0
++#define LINK_SPEED_10M 10
++#define LINK_SPEED_100M 100
++#define LINK_SPEED_500M 500
++#define LINK_SPEED_1G 1000
++#define LINK_SPEED_2P5G 2500
++
++typedef enum
++{
++    PHY_CROSSPVER_MODE_AUTO = 0,
++    PHY_CROSSPVER_MODE_MDI,
++    PHY_CROSSPVER_MODE_MDIX,
++    PHY_CROSSPVER_MODE_END
++} PHY_CROSSPVER_MODE;
++
++typedef enum
++{
++    PHY_CROSSPVER_STATUS_MDI = 0,
++    PHY_CROSSPVER_STATUS_MDIX,
++    PHY_CROSSPVER_STATUS_END
++} PHY_CROSSPVER_STATUS;
++
++typedef enum
++{
++    PHY_AUTO_MODE = 0,
++    PHY_SLAVE_MODE,
++    PHY_MASTER_MODE,
++    PHY_MASTER_SLAVE_END
++} PHY_MASTERSLAVE_MODE;
++
++typedef struct
++{
++    UINT32 Half_10:1;
++    UINT32 Full_10:1;
++
++    UINT32 Half_100:1;
++    UINT32 Full_100:1;
++
++    UINT32 Full_1000:1;
++
++    UINT32 adv_2_5G:1;
++
++    UINT32 FC:1;
++    UINT32 AsyFC:1;
++} PHY_LINK_ABILITY;
++
++typedef struct
++{
++    UINT8 EEE_100:1;
++    UINT8 EEE_1000:1;
++    UINT8 EEE_2_5G:1;
++} PHY_EEE_ENABLE;
++
++typedef struct
++{
++    UINT8 TX_SWAP:1;
++    UINT8 RX_SWAP:1;
++} PHY_SERDES_POLARITY_SWAP;
++
++typedef enum
++{
++	TESTMODE_CHANNEL_NONE = 0,
++	TESTMODE_CHANNEL_A,
++	TESTMODE_CHANNEL_B,
++	TESTMODE_CHANNEL_C,
++	TESTMODE_CHANNEL_D,
++	TESTMODE_CHANNEL_END
++} PHY_TESTMODE_CHANNEL;
++
++typedef struct
++{
++    UINT32 TM1:1;
++    UINT32 TM2:1;
++    UINT32 TM3:1;
++    UINT32 TM4:1;
++    UINT32 TM5:1;
++    UINT32 TM6:1;
++
++    UINT32 TONE1:1;
++    UINT32 TONE2:1;
++    UINT32 TONE3:1;
++    UINT32 TONE4:1;
++    UINT32 TONE5:1;
++
++    UINT32 TMFINISH:1;
++
++    UINT32 NORMAL:1;
++    UINT32 HARMONIC:1;
++    UINT32 LINKPLUSE:1;
++
++	PHY_TESTMODE_CHANNEL channel:3;
++} PHY_IEEE_TEST_MODE;
++
++typedef enum
++{
++    MIS_MATCH_OPEN = 1, // Mis-Match_Open, larger_than_130ohm
++    MIS_MATCH_SHORT = 2, // Mis-Match_short, less_than_77ohm
++} PHY_RTCT_STATUS_MISMATCH;
++
++typedef struct
++{
++    BOOL Open;
++    BOOL Short;
++    PHY_RTCT_STATUS_MISMATCH Mismatch;
++} PHY_RTCT_STATUS;
++
++typedef struct
++{
++
++    UINT16 linkType;
++
++    UINT32 rxLen;
++    UINT32 txLen;
++
++    UINT32 channelALen;
++    UINT32 channelBLen;
++    UINT32 channelCLen;
++    UINT32 channelDLen;
++
++    PHY_RTCT_STATUS channelAStatus;
++    PHY_RTCT_STATUS channelBStatus;
++    PHY_RTCT_STATUS channelCStatus;
++    PHY_RTCT_STATUS channelDStatus;
++} PHY_RTCT_RESULT;
++
++typedef enum
++{
++    PHY_SERDES_MODE_OTHER = 0,
++    PHY_SERDES_MODE_SGMII,
++    PHY_SERDES_MODE_HiSGMII,
++    PHY_SERDES_MODE_2500BASEX,
++    PHY_SERDES_MODE_USXGMII,
++    PHY_SERDES_MODE_NO_SDS,
++    PHY_SERDES_MODE_END
++} PHY_SERDES_MODE;
++
++typedef enum
++{
++    PHY_SERDES_OPTION_2500BASEX_SGMII = 0,
++    PHY_SERDES_OPTION_HiSGMII_SGMII,
++    PHY_SERDES_OPTION_2500BASEX,
++    PHY_SERDES_OPTION_HiSGMII,
++    PHY_SERDES_OPTION_OTHER,
++} PHY_SERDES_OPTION;
++
++typedef struct
++{
++    UINT16 MASK15_0;
++    UINT16 MASK31_16;
++    UINT16 MASK47_32;
++    UINT16 MASK63_48;
++    UINT16 MASK79_64;
++    UINT16 MASK95_80;
++    UINT16 MASK111_96;
++    UINT16 MASK127_112;
++    UINT16 CRC;
++} PHY_WAKEUP_FRAME;
++
++typedef struct
++{
++    UINT16 REG15_0;
++    UINT16 REG31_16;
++    UINT16 REG47_32;
++    UINT16 REG63_48;
++} PHY_MULTICAST_REG;
++
++typedef struct
++{
++    UINT16 ADDR15_0;
++    UINT16 ADDR31_16;
++    UINT16 ADDR47_32;
++} PHY_MAC_ADDRESS;
++
++typedef struct
++{
++    UINT32 LINKCHG:1;
++    UINT32 MAGIC:1;
++    UINT32 ARBITRARY:1;
++    UINT32 UNICAST:1;
++    UINT32 MULTICAST:1;
++    UINT32 BROADCAST:1;
++
++    UINT32 FRAME0:1;
++    UINT32 FRAME1:1;
++    UINT32 FRAME2:1;
++    UINT32 FRAME3:1;
++    UINT32 FRAME4:1;
++    UINT32 FRAME5:1;
++    UINT32 FRAME6:1;
++    UINT32 FRAME7:1;
++
++    UINT32 MAXPKTLENGTH;
++    PHY_MAC_ADDRESS macaddress;
++    PHY_MULTICAST_REG multicast;
++
++    PHY_WAKEUP_FRAME wakeframe0;
++
++} PHY_WOL_EVENT;
++
++typedef struct
++{
++    bool	Enable;
++    UINT16	Temperature;
++    UINT16	Temperature_threshold;
++}PHY_THERMAL_RESULT;
++
++
++BOOLEAN
++MmdPhyRead(
++    IN  HANDLE hDevice,
++    IN  UINT16 dev,
++    IN  UINT16 addr,
++    OUT UINT16 *data);
++
++BOOLEAN
++MmdPhyWrite(
++    IN HANDLE hDevice,
++    IN UINT16 dev,
++    IN UINT16 addr,
++    IN UINT16 data);
++
++
++
++
++#endif /* __NIC_RTL8226_TYPEDEF_H__ */
++
++
+diff --git a/drivers/net/ethernet/mediatek/rtl822x/rtl_adapter.c b/drivers/net/ethernet/mediatek/rtl822x/rtl_adapter.c
+new file mode 100755
+index 000000000..bd3d025c3
+--- /dev/null
++++ b/drivers/net/ethernet/mediatek/rtl822x/rtl_adapter.c
+@@ -0,0 +1,42 @@
++#include <linux/of_device.h>
++#include <linux/of_mdio.h>
++#include <linux/of_net.h>
++#include <linux/mfd/syscon.h>
++#include <linux/regmap.h>
++#include <linux/clk.h>
++#include <linux/pm_runtime.h>
++#include <linux/if_vlan.h>
++#include <linux/reset.h>
++#include <linux/tcp.h>
++#include <linux/interrupt.h>
++#include <linux/mdio.h>
++#include <linux/of_mdio.h>
++#include <linux/of_platform.h>
++#include <linux/of_gpio.h>
++#include <linux/of_net.h>
++#include <linux/of_irq.h>
++
++#include "../mtk_eth_soc.h"
++#include "rtl_adapter.h"
++#include "rtl8226_typedef.h"
++
++bool MmdPhyWrite(HANDLE unit, uint16_t devad, uint16_t addr, uint16_t value)
++{
++    struct mtk_eth *eth = unit.eth;
++    if (eth != NULL)
++    {
++        mtk_mmd_write(eth, unit.addr, devad, addr, value);
++    }
++    return TRUE;
++}
++
++bool MmdPhyRead(HANDLE unit, uint16_t devad, uint16_t addr, uint16_t *value)
++{
++    struct mtk_eth *eth = unit.eth;
++    if (eth != NULL)
++    {
++        int val = mtk_mmd_read(eth, unit.addr, devad, addr);
++        *value = (uint16_t)val;
++    }
++    return TRUE;
++}
+\ No newline at end of file
+diff --git a/drivers/net/ethernet/mediatek/rtl822x/rtl_adapter.h b/drivers/net/ethernet/mediatek/rtl822x/rtl_adapter.h
+new file mode 100755
+index 000000000..cfb1665c9
+--- /dev/null
++++ b/drivers/net/ethernet/mediatek/rtl822x/rtl_adapter.h
+@@ -0,0 +1,40 @@
++#ifndef __RTL_ADAPTER_LOAD__
++#define __RTL_ADAPTER_LOAD__
++
++#ifdef __KERNEL__
++#include <linux/errno.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/perf_event.h>
++#include <linux/platform_device.h>
++#include <linux/clk.h>
++#include <linux/netdevice.h>
++#include <linux/interrupt.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++#include <linux/types.h>
++#include <linux/ioport.h>
++#endif
++
++#ifndef FALSE
++#define FALSE 0
++#endif
++
++#ifndef TRUE
++#define TRUE 1
++#endif
++
++
++#define uint32 uint32_t
++#define uint16 uint16_t
++#define uint8 uint8_t
++#ifdef __KERNEL__
++#define osal_time_udelay(aa) msleep((aa)/1000)
++#define phy_osal_printf printk
++#define osal_printf printk
++#else
++#define osal_time_udelay(aa) usleep(aa)
++#define phy_osal_printf printf
++#define osal_printf printf
++#endif
++#endif
+\ No newline at end of file
