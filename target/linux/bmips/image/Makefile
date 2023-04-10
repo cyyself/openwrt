@@ -194,12 +194,18 @@ define Build/cfe-sercomm-crypto
 endef
 
 define Build/cfe-sercomm-load
+	$(TOPDIR)/scripts/sercomm-pid.py \
+		--hw-version $(SERCOMM_HWVER) \
+		--sw-version $(SERCOMM_SWVER) \
+		--extra-padding-size 0x10 \
+		--pid-file $@.pid
 	$(TOPDIR)/scripts/sercomm-payload.py \
 		--input-file $@ \
 		--output-file $@.new \
-		--pid "$(SERCOMM_PID)"
+		--pid-file $@.pid
 
 	mv $@.new $@
+	rm -f $@.pid
 endef
 
 define Build/cfe-sercomm-part
@@ -208,18 +214,18 @@ define Build/cfe-sercomm-part
 		--output-file $@.kernel_rootfs \
 		--part-name kernel_rootfs \
 		--part-version OpenWrt \
-		--rootfs-version $(SERCOMM_VERSION)
+		--rootfs-version $(SERCOMM_FSVER)
 
 	rm -rf $@-rootfs_lib
 	mkdir -p $@-rootfs_lib
-	echo $(SERCOMM_VERSION) > $@-rootfs_lib/lib_ver
+	echo $(SERCOMM_FSVER) > $@-rootfs_lib/lib_ver
 	$(call Build/cfe-jffs2,$@-rootfs_lib)
 	$(call Build/pad-to,$(BLOCKSIZE))
 	$(TOPDIR)/scripts/sercomm-partition-tag.py \
 		--input-file $@ \
 		--output-file $@.rootfs_lib \
 		--part-name rootfs_lib \
-		--part-version $(SERCOMM_VERSION)
+		--part-version $(SERCOMM_FSVER)
 
 	mv $@.kernel_rootfs $@
 	dd if=$@.rootfs_lib >> $@
